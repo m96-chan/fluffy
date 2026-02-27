@@ -2,3 +2,6 @@
 
 # VRM models — place your own model at assets/models/mascot.vrm
 assets/models/
+
+# Animation files — convert from Mixamo FBX using tools/convert_anim.sh
+assets/anims/
