@@ -11,7 +11,7 @@
 
 *Talk to a VRM character that lives on your desktop. Powered by Claude, Whisper, and Fish Speech.*
 
-![demo placeholder](assets/demo.gif)
+<!-- ![demo](assets/demo.gif) -->
 
 </div>
 
