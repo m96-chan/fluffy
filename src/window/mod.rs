@@ -2,7 +2,7 @@ pub mod config;
 pub mod drag;
 
 use bevy::prelude::*;
-use bevy::window::{CursorOptions, PrimaryWindow, WindowPosition};
+use bevy::window::{CursorOptions, PrimaryWindow, WindowLevel, WindowPosition};
 
 use config::WindowConfig;
 
@@ -16,7 +16,11 @@ impl Plugin for WindowManagerPlugin {
             .add_systems(Startup, apply_initial_config)
             .add_systems(
                 Update,
-                (handle_drag, handle_click_through_toggle, save_on_exit),
+                (
+                    handle_drag,
+                    handle_click_through_toggle,
+                    save_on_exit,
+                ),
             );
     }
 }
@@ -24,12 +28,15 @@ impl Plugin for WindowManagerPlugin {
 // ── Startup ──────────────────────────────────────────────────────────────────
 
 fn apply_initial_config(
-    cfg: Res<WindowConfig>,
+    mut cfg: ResMut<WindowConfig>,
     mut window_q: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     let Ok((mut win, mut cursor)) = window_q.single_mut() else { return };
+    win.window_level = WindowLevel::AlwaysOnTop;
     win.position = WindowPosition::At(IVec2::new(cfg.x, cfg.y));
-    cursor.hit_test = !cfg.click_through;
+    // Always start interactive so drag/C-toggle are recoverable every launch.
+    cfg.click_through = false;
+    cursor.hit_test = true;
 }
 
 // ── Drag — left-click triggers OS-native window move via start_drag_move() ──

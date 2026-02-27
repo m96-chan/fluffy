@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 
-use crate::chat::state::{ChatState, MessageRole, MASCOT_WIDTH};
+use crate::chat::state::{ChatState, MessageRole, MASCOT_WIDTH, CHAT_PANEL_BOTTOM_INSET};
 use crate::events::PipelineMessage;
 
 pub struct ChatOverlayPlugin;
@@ -53,7 +53,16 @@ fn setup_ui(mut commands: Commands) {
                     flex_direction: FlexDirection::Column,
                     flex_grow: 1.0,
                     height: Val::Percent(100.0),
-                    padding: UiRect::all(Val::Px(10.0)),
+                    margin: UiRect {
+                        bottom: Val::Px(CHAT_PANEL_BOTTOM_INSET),
+                        ..default()
+                    },
+                    padding: UiRect {
+                        left: Val::Px(10.0),
+                        right: Val::Px(10.0),
+                        top: Val::Px(10.0),
+                        bottom: Val::Px(0.0),
+                    },
                     overflow: Overflow::clip_y(),
                     ..default()
                 },

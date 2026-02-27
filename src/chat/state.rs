@@ -6,6 +6,8 @@ pub const MASCOT_WIDTH: u32 = 400;
 pub const CHAT_PANEL_WIDTH: u32 = 350;
 pub const WINDOW_WIDTH: u32 = MASCOT_WIDTH + CHAT_PANEL_WIDTH; // 750
 pub const WINDOW_HEIGHT: u32 = 600;
+// Raise chat panel from window bottom so its lower edge lines up with mascot feet.
+pub const CHAT_PANEL_BOTTOM_INSET: f32 = 80.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {

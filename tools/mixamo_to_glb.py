@@ -1,11 +1,19 @@
 """
-Mixamo FBX → GLB converter with bone name remapping.
+Mixamo FBX → GLB converter with VRM-based retargeting.
 
 Usage:
-    blender --background --python tools/mixamo_to_glb.py -- input.fbx output.glb
+    blender --background --python tools/mixamo_to_glb.py -- input.fbx output.glb [target.vrm]
 
-Renames Mixamo bones (mixamorig:Hips etc.) to MANUKA / VRM 0.x naming
-so that the GLB can be loaded and retargeted in Fluffy.
+Steps:
+  1. Import FBX (Mixamo source armature)
+  2. Rename Mixamo bones → VRM 0.x / MANUKA naming
+  3. If target.vrm is given:
+       - Import VRM as target armature
+       - Add Copy Rotation constraints (target ← source)
+       - Bake animation onto target with visual keying
+       - Delete source armature + constraints
+       - Export target armature only
+  4. If no target VRM, export source directly (legacy mode)
 """
 
 import bpy
@@ -13,7 +21,6 @@ import sys
 import os
 
 # ── Mixamo → VRM 0.x bone name map ──────────────────────────────────────────
-# Left side uses _L suffix, right side uses _R suffix (MANUKA convention)
 BONE_MAP = {
     "mixamorig:Hips":           "Hips",
     "mixamorig:Spine":          "Spine",
@@ -42,7 +49,6 @@ BONE_MAP = {
     "mixamorig:RightFoot":      "Foot_R",
     "mixamorig:RightToeBase":   "Toes_R",
 
-    # Fingers (optional, mapped to generic names)
     "mixamorig:LeftHandThumb1":  "Thumb1_L",
     "mixamorig:LeftHandThumb2":  "Thumb2_L",
     "mixamorig:LeftHandThumb3":  "Thumb3_L",
@@ -78,16 +84,16 @@ BONE_MAP = {
 
 
 def parse_args():
-    """Parse arguments after '--'."""
     argv = sys.argv
     if "--" not in argv:
-        print("Usage: blender --background --python mixamo_to_glb.py -- input.fbx output.glb")
+        print("Usage: blender --background --python mixamo_to_glb.py -- input.fbx output.glb [target.vrm]")
         sys.exit(1)
     args = argv[argv.index("--") + 1:]
     if len(args) < 2:
         print("Error: need input.fbx and output.glb")
         sys.exit(1)
-    return args[0], args[1]
+    vrm_path = args[2] if len(args) >= 3 else None
+    return args[0], args[1], vrm_path
 
 
 def clear_scene():
@@ -98,15 +104,11 @@ def clear_scene():
 
 
 def import_fbx(path):
-    print(f"Importing: {path}")
-    # Blender 5.0 の bpy.ops.import_scene.fbx は CLI から呼ぶと
-    # self.files 未初期化バグがあるため、モジュールを直接呼ぶ
-    import sys
+    print(f"Importing FBX: {path}")
     sys.path.append('/usr/share/blender/5.0/scripts/addons_core')
     from io_scene_fbx import import_fbx as _fbx_loader
 
     class _FakeOp:
-        """bpy.ops の代わりに直接 load() を呼ぶための最小スタブ。"""
         use_custom_normals = True
         use_subsurf = False
         use_image_search = True
@@ -126,37 +128,24 @@ def import_fbx(path):
         axis_up = 'Y'
         global_scale = 1.0
         bake_space_transform = False
+        def report(self, level, msg): print(f"[{level}] {msg}")
 
-        def report(self, level, msg):
-            print(f"[{level}] {msg}")
-
-    result = _fbx_loader.load(
-        _FakeOp(),
-        bpy.context,
-        filepath=path,
-    )
-    print(f"Import result: {result}")
+    _fbx_loader.load(_FakeOp(), bpy.context, filepath=path)
 
 
 def remap_bones():
-    """Rename all Mixamo bones in all armatures and actions."""
+    """Rename Mixamo bones and FCurve data_paths to VRM 0.x naming."""
     renamed = 0
-
-    # Rename bones in armatures
     for obj in bpy.data.objects:
         if obj.type != 'ARMATURE':
             continue
-        arm = obj.data
-        for bone in arm.bones:
+        for bone in obj.data.bones:
             new_name = BONE_MAP.get(bone.name)
             if new_name:
                 print(f"  bone: {bone.name} → {new_name}")
                 bone.name = new_name
                 renamed += 1
 
-    # Rename bone channels in all animation actions
-    # Blender 5.0: Layered Action API (action.fcurves は廃止)
-    # strip.channelbags → channelbag.fcurves でアクセス
     for action in bpy.data.actions:
         fcurves = []
         if action.is_action_layered:
@@ -166,97 +155,181 @@ def remap_bones():
                         for cb in strip.channelbags:
                             fcurves.extend(cb.fcurves)
         else:
-            # 旧形式フォールバック
             fcurves = list(action.fcurves)
 
-        for fcurve in fcurves:
-            dp = fcurve.data_path
+        for fc in fcurves:
+            dp = fc.data_path
             for old, new in BONE_MAP.items():
                 if f'"{old}"' in dp:
-                    fcurve.data_path = dp.replace(f'"{old}"', f'"{new}"')
+                    fc.data_path = dp.replace(f'"{old}"', f'"{new}"')
                     break
 
     print(f"Renamed {renamed} bones.")
+    return renamed
 
 
-def apply_tpose_as_rest():
-    """
-    Mixamo A-pose → T-pose に変換してレストポーズとして適用する。
-
-    手順:
-      1. 全フレームをビジュアルキーフレームにベイク（絶対座標で保存）
-      2. 全ボーン回転クリア（= T-pose）
-      3. T-pose をレストポーズとして適用
-
-    ベイク後のカーブは絶対座標なのでレストポーズ変更の影響を受けない。
-    """
+def get_armature(exclude=None):
+    """Return first armature in scene, optionally excluding one by name."""
     for obj in bpy.data.objects:
-        if obj.type != 'ARMATURE':
+        if obj.type == 'ARMATURE' and obj.name != exclude:
+            return obj
+    return None
+
+
+def import_vrm(path):
+    """Import VRM using the VRM addon (must be installed)."""
+    print(f"Importing VRM: {path}")
+    bpy.ops.preferences.addon_enable(module="bl_ext.user_default.vrm")
+    bpy.ops.import_scene.vrm(filepath=path)
+
+
+def retarget_with_constraints(source_arm, target_arm):
+    """
+    Set up Copy Rotation constraints on target armature bones pointing to
+    the source (Mixamo) armature. Blender handles axis alignment automatically.
+
+    Both armatures must share bone names (done by remap_bones()).
+    """
+    source_bone_names = {b.name for b in source_arm.data.bones}
+    target_bone_names = {b.name for b in target_arm.data.bones}
+    shared = source_bone_names & target_bone_names
+    print(f"Shared bones: {len(shared)} (source={len(source_bone_names)}, target={len(target_bone_names)})")
+
+    bpy.context.view_layer.objects.active = target_arm
+    bpy.ops.object.mode_set(mode='POSE')
+
+    added = 0
+    for bone_name in shared:
+        pose_bone = target_arm.pose.bones.get(bone_name)
+        if pose_bone is None:
             continue
 
-        bpy.context.view_layer.objects.active = obj
-        obj.select_set(True)
+        c = pose_bone.constraints.new('COPY_ROTATION')
+        c.name = "MixamoRetarget"
+        c.target = source_arm
+        c.subtarget = bone_name
+        # POSE 空間: T-pose を基準とした相対回転をコピーする。
+        # LOCAL だとボーンのローカル軸がそのままコピーされて軸ズレが起きる。
+        c.target_space = 'POSE'
+        c.owner_space = 'POSE'
+        c.use_x = True
+        c.use_y = True
+        c.use_z = True
+        added += 1
 
-        # フレーム範囲を取得
-        frame_start, frame_end = 1, 100
-        if obj.animation_data and obj.animation_data.action:
-            r = obj.animation_data.action.frame_range
-            frame_start = int(r[0])
-            frame_end   = int(r[1])
-
-        print(f"  Baking {obj.name}: frame {frame_start}–{frame_end}")
-
-        # ① ビジュアルキーフレームにベイク
-        bpy.ops.object.mode_set(mode='POSE')
-        bpy.ops.pose.select_all(action='SELECT')
-        bpy.ops.nla.bake(
-            frame_start=frame_start,
-            frame_end=frame_end,
-            visual_keying=True,
-            clear_constraints=False,
-            clear_parents=False,
-            use_current_action=True,
-            bake_types={'POSE'},
-        )
-
-        # ② frame_start に移動して T-pose（回転ゼロ）に設定
-        bpy.context.scene.frame_set(frame_start)
-        bpy.ops.pose.select_all(action='SELECT')
-        bpy.ops.pose.rot_clear()
-
-        # ③ T-pose をレストポーズとして適用
-        bpy.ops.pose.armature_apply()
-
-        bpy.ops.object.mode_set(mode='OBJECT')
-        print(f"  T-pose rest pose applied to: {obj.name}")
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print(f"Added {added} Copy Rotation constraints.")
 
 
-def export_glb(path):
+def bake_to_target(source_arm, target_arm):
+    """Bake the constrained animation onto the target armature."""
+    # Get frame range from source action
+    frame_start, frame_end = 1, 100
+    if source_arm.animation_data and source_arm.animation_data.action:
+        r = source_arm.animation_data.action.frame_range
+        frame_start = int(r[0])
+        frame_end   = int(r[1])
+    print(f"Baking frames {frame_start}–{frame_end} onto {target_arm.name}")
+
+    bpy.context.view_layer.objects.active = target_arm
+    target_arm.select_set(True)
+    bpy.ops.object.mode_set(mode='POSE')
+    bpy.ops.pose.select_all(action='SELECT')
+
+    bpy.ops.nla.bake(
+        frame_start=frame_start,
+        frame_end=frame_end,
+        visual_keying=True,      # 拘束込みの見た目通りのポーズを記録
+        clear_constraints=True,  # ベイク後に拘束を自動削除
+        clear_parents=False,
+        use_current_action=True,
+        bake_types={'POSE'},
+    )
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print("Bake complete.")
+
+
+def delete_object_and_data(obj):
+    """Delete object and its data block."""
+    data = obj.data
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if data and data.users == 0:
+        if isinstance(data, bpy.types.Armature):
+            bpy.data.armatures.remove(data)
+
+
+def select_only(obj):
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+
+
+def export_glb(path, arm_obj):
+    """Export only the target armature as GLB."""
     print(f"Exporting: {path}")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+    # Select only the target armature (and its children for safety)
+    bpy.ops.object.select_all(action='DESELECT')
+    arm_obj.select_set(True)
+    for child in arm_obj.children_recursive:
+        child.select_set(True)
+
     bpy.ops.export_scene.gltf(
         filepath=path,
         export_format='GLB',
+        use_selection=True,
         export_animations=True,
         export_anim_single_armature=True,
-        export_frame_range=False,        # export all frames
+        export_frame_range=False,
         export_apply=False,
     )
 
 
 def main():
-    input_path, output_path = parse_args()
+    input_path, output_path, vrm_path = parse_args()
 
     if not os.path.exists(input_path):
-        print(f"Error: input file not found: {input_path}")
+        print(f"Error: input not found: {input_path}")
         sys.exit(1)
 
     clear_scene()
     import_fbx(input_path)
     remap_bones()
-    # apply_tpose_as_rest()  # Blender 5.0ではカーブが正しく更新されないため無効
-    # TODO: 適切なリターゲット（issue #5）
-    export_glb(output_path)
+
+    source_arm = get_armature()
+    if source_arm is None:
+        print("Error: no armature found after FBX import")
+        sys.exit(1)
+    source_arm.name = "SourceArmature"
+    print(f"Source armature: {source_arm.name} ({len(source_arm.data.bones)} bones)")
+
+    if vrm_path:
+        if not os.path.exists(vrm_path):
+            print(f"Error: VRM not found: {vrm_path}")
+            sys.exit(1)
+
+        import_vrm(vrm_path)
+        target_arm = get_armature(exclude="SourceArmature")
+        if target_arm is None:
+            print("Error: VRM armature not found after import")
+            sys.exit(1)
+        print(f"Target armature: {target_arm.name} ({len(target_arm.data.bones)} bones)")
+
+        retarget_with_constraints(source_arm, target_arm)
+        bake_to_target(source_arm, target_arm)
+
+        # ソースアーマチュアを削除（ベイク済み）
+        delete_object_and_data(source_arm)
+        print("Source armature removed.")
+
+        export_glb(output_path, target_arm)
+    else:
+        # VRM未指定: 従来通りソースをそのままエクスポート
+        print("No VRM target specified — exporting source directly.")
+        export_glb(output_path, source_arm)
+
     print(f"Done: {output_path}")
 
 

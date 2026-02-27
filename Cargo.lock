@@ -2407,6 +2407,7 @@ name = "fluffy"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_mesh",
  "cpal",
  "dirs-next",
  "futures-util",

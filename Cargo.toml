@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 # Game engine
 bevy = { version = "0.18", features = ["dynamic_linking"] }
+bevy_mesh = { version = "0.18" }  # SkinnedMesh/IBM アクセス用（patch経由でローカルパッチ適用）
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
