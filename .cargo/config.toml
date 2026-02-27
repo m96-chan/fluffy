@@ -2,3 +2,5 @@
 PKG_CONFIG_PATH = "/usr/lib/pkgconfig:/usr/lib32/pkgconfig"
 # Wayland では WindowLevel::AlwaysOnTop が効かないため X11 (XWayland) を強制
 WINIT_UNIX_BACKEND = "x11"
+# CUDA toolkit path (Arch: pacman -S cuda)
+PATH = { value = "/opt/cuda/bin:/usr/local/bin:/usr/bin", force = true }

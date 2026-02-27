@@ -8,6 +8,14 @@ rust-version = "1.80"
 name = "fluffy"
 path = "src/main.rs"
 
+[[bin]]
+name = "tts_test"
+path = "src/bin/tts_test.rs"
+
+[[bin]]
+name = "miocodec_test"
+path = "src/bin/miocodec_test.rs"
+
 [dependencies]
 # Game engine
 bevy = { version = "0.18", features = ["dynamic_linking"] }
@@ -28,6 +36,17 @@ whisper-rs = "0.11"
 # HTTP / LLM / TTS
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 futures-util = "0.3"
+
+# Neural network inference (candle)
+candle-core = { version = "0.9" }
+candle-nn = { version = "0.9" }
+safetensors = "0.5"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+hf-hub = { version = "0.4", features = ["tokio"] }
+
+# Signal processing
+rustfft = "6"
+num-complex = "0.4"
 
 # GLTF / VRM parsing
 gltf = { version = "1.4", features = ["KHR_lights_punctual", "KHR_materials_unlit", "extras"] }
@@ -60,6 +79,8 @@ bevy_pbr = { path = "patches/bevy_pbr" }
 default = []
 # Release build: remove dynamic_linking
 release = []
+# Enable CUDA GPU acceleration (requires nvcc / CUDA toolkit)
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
 
 [profile.dev]
 opt-level = 1

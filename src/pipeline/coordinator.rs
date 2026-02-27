@@ -9,7 +9,7 @@ use crate::events::{MascotPhase, PipelineMessage};
 use crate::llm::{client as llm_client, tool_use};
 use crate::pipeline::lip_sync;
 use crate::state::AppConfig;
-use crate::tts::{client as tts_client, sentence::SentenceSplitter};
+use crate::tts::{client as tts_client, engine::TtsEngine, sentence::SentenceSplitter};
 use crate::stt::whisper as stt_whisper;
 
 /// Message types flowing through the internal pipeline channels.
@@ -47,6 +47,14 @@ async fn run_pipeline(
     cancel: CancellationToken,
 ) -> Result<(), AppError> {
     send(&msg_tx, PipelineMessage::PhaseChanged(MascotPhase::Idle)).await;
+
+    // Initialize TTS engine
+    info!("Pipeline: initializing TTS engine...");
+    let tts_engine = TtsEngine::initialize(&config.tts_clone_voice_wav)
+        .await
+        .map_err(|e| AppError::Pipeline(format!("TTS engine init: {e}")))?;
+    let tts_engine = Arc::new(tokio::sync::Mutex::new(tts_engine));
+    info!("Pipeline: TTS engine ready");
 
     // Start audio capture
     let audio_rx = capture::start_capture(config.audio_device.clone()).await?;
@@ -128,7 +136,7 @@ async fn run_pipeline(
 
                 send(&msg_tx, PipelineMessage::PhaseChanged(MascotPhase::Thinking)).await;
 
-                process_llm_turn(&config, &mut conversation, &msg_tx, cancel.clone()).await;
+                process_llm_turn(&config, &mut conversation, &msg_tx, cancel.clone(), &tts_engine).await;
 
                 if !cancel.is_cancelled() {
                     send(&msg_tx, PipelineMessage::PhaseChanged(MascotPhase::Listening)).await;
@@ -150,6 +158,7 @@ async fn process_llm_turn(
     conversation: &mut Vec<llm_client::Message>,
     msg_tx: &mpsc::Sender<PipelineMessage>,
     cancel: CancellationToken,
+    tts_engine: &Arc<tokio::sync::Mutex<TtsEngine>>,
 ) {
     let tools = llm_client::make_tool_definitions();
     let (llm_tx, mut llm_rx) = mpsc::channel(64);
@@ -196,13 +205,13 @@ async fn process_llm_turn(
         }
     });
 
-    let tts_config = (*config).clone();
+    let tts_engine_clone = tts_engine.clone();
     let (sentence_tts_tx, mut sentence_tts_rx) = mpsc::channel::<String>(4);
     let msg_tx_tts = msg_tx.clone();
 
     tokio::spawn(async move {
         while let Some(sentence) = sentence_tts_rx.recv().await {
-            match tts_client::synthesize(&tts_config, &sentence).await {
+            match tts_client::synthesize(&tts_engine_clone, &sentence).await {
                 Ok(mut pcm_rx) => {
                     while let Some(chunk) = pcm_rx.recv().await {
                         let _ = tts_tx.send(chunk).await;

@@ -10,9 +10,7 @@ pub struct AppConfig {
     pub api_key: String,
     pub anthropic_api_url: String,
     pub model: String,
-    pub tts_clone_bin: String,
     pub tts_clone_voice_wav: PathBuf,
-    pub tts_clone_model: String,
     pub vad_threshold: f32,
     pub vad_silence_hold_frames: usize,
     pub audio_device: Option<String>,
@@ -31,13 +29,9 @@ impl Default for AppConfig {
                 .unwrap_or_else(|_| "https://api.anthropic.com/v1/messages".to_string()),
             model: std::env::var("ANTHROPIC_MODEL")
                 .unwrap_or_else(|_| "claude-sonnet-4-6".to_string()),
-            tts_clone_bin: std::env::var("FLUFFY_TTS_BIN")
-                .unwrap_or_else(|_| "tts".to_string()),
             tts_clone_voice_wav: std::env::var("FLUFFY_TTS_CLONE_VOICE_WAV")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("assets/voice/このボイス.wav")),
-            tts_clone_model: std::env::var("FLUFFY_TTS_CLONE_MODEL")
-                .unwrap_or_else(|_| "tts_models/multilingual/multi-dataset/xtts_v2".to_string()),
             vad_threshold: 0.02,
             vad_silence_hold_frames: 25,
             audio_device: None,
@@ -96,6 +90,12 @@ pub enum ConfigReady {
     Ok,
     MissingApiKey,
     MissingWhisperModel(PathBuf),
+}
+
+/// Handle to the initialized TTS engine — stored as a Bevy Resource.
+#[derive(Resource)]
+pub struct TtsEngineHandle {
+    pub engine: std::sync::Arc<tokio::sync::Mutex<crate::tts::engine::TtsEngine>>,
 }
 
 /// Handle to an initialized Whisper model — stored as a Bevy Resource.
