@@ -1,1 +1,4 @@
 /target/
+
+# VRM models — place your own model at assets/models/mascot.vrm
+assets/models/
