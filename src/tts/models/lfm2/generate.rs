@@ -1,5 +1,5 @@
 use candle_core::{DType, Device, Result, Tensor};
-use tracing::info;
+use tracing::{debug, info};
 
 use super::Lfm2ForCausalLM;
 
@@ -46,20 +46,19 @@ pub fn generate(
     let seq_len = input_ids.len();
     let mut last_logits = logits.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
 
-    // Diagnostic: show top-5 logits from prefill to verify model output
-    {
+    // Diagnostic: show top-5 logits from prefill (expensive D2H — debug only)
+    if tracing::enabled!(tracing::Level::DEBUG) {
         let diag = last_logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
         let mut indexed: Vec<(usize, f32)> = diag.iter().copied().enumerate().collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let top5: Vec<String> = indexed[..5].iter()
             .map(|(i, v)| format!("{i}={v:.3}")).collect();
         let eos_logit = diag.get(params.eos_token_id as usize).copied().unwrap_or(f32::NAN);
-        info!("Prefill logits top5: [{}], eos({})={:.3}", top5.join(", "), params.eos_token_id, eos_logit);
-        // Check for NaN/Inf
+        debug!("Prefill logits top5: [{}], eos({})={:.3}", top5.join(", "), params.eos_token_id, eos_logit);
         let nans = diag.iter().filter(|v| v.is_nan()).count();
         let infs = diag.iter().filter(|v| v.is_infinite()).count();
         if nans > 0 || infs > 0 {
-            info!("WARNING: {} NaN, {} Inf in logits", nans, infs);
+            debug!("WARNING: {} NaN, {} Inf in logits", nans, infs);
         }
     }
 
@@ -95,15 +94,15 @@ pub fn generate(
         last_logits = logits.squeeze(1)?;
         offset += 1;
 
-        // Diagnostic: first 3 steps — show logits to track state changes
-        if step < 3 {
+        // Diagnostic: first 3 steps — show logits (expensive D2H — debug only)
+        if step < 3 && tracing::enabled!(tracing::Level::DEBUG) {
             let diag = last_logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
             let mut indexed: Vec<(usize, f32)> = diag.iter().copied().enumerate().collect();
             indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
             let top5: Vec<String> = indexed[..5].iter()
                 .map(|(i, v)| format!("{i}={v:.3}")).collect();
             let tok_logit = diag.get(70774).copied().unwrap_or(f32::NAN);
-            info!("  step {} logits: top5=[{}], 70774={:.3}", step, top5.join(", "), tok_logit);
+            debug!("  step {} logits: top5=[{}], 70774={:.3}", step, top5.join(", "), tok_logit);
         }
     }
 

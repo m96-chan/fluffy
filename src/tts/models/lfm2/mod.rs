@@ -157,7 +157,9 @@ pub struct Lfm2ForCausalLM {
     embed_tokens: Embedding,
     embedding_norm: RmsNorm,
     layers: Vec<Lfm2Layer>,
-    /// lm_head shares weights with embed_tokens (tied embedding).
+    /// Pre-transposed F32 lm_head weight: (hidden_size, vocab_size).
+    /// Avoids repeated BF16→F32 + transpose on every generation step.
+    lm_head_weight_t: Tensor,
     config: Lfm2Config,
 }
 
@@ -174,10 +176,18 @@ impl Lfm2ForCausalLM {
             layers.push(layer);
         }
 
+        // Pre-transpose and upcast lm_head weight once (tied with embed_tokens)
+        let lm_head_weight_t = embed_tokens
+            .embeddings()
+            .to_dtype(DType::F32)?
+            .t()?
+            .contiguous()?; // (hidden_size, vocab_size)
+
         Ok(Self {
             embed_tokens,
             embedding_norm,
             layers,
+            lm_head_weight_t,
             config: cfg.clone(),
         })
     }
@@ -201,13 +211,10 @@ impl Lfm2ForCausalLM {
         // Final RMSNorm before lm_head (prevents hidden state magnitude explosion)
         h = self.embedding_norm.forward(&h)?;
 
-        // Tied embedding: lm_head weight = embed_tokens weight
-        // Upcast to F32 for lm_head — BF16 logits lose precision at large values
-        // (BF16 can only represent integers in [128,256), destroying token discrimination)
+        // lm_head: h @ W_t where W_t is pre-transposed F32 (hidden, vocab)
         let (b, t, d) = h.dims3()?;
-        let lm_head_weight = self.embed_tokens.embeddings(); // (vocab, d)
         let h_flat = h.to_dtype(DType::F32)?.reshape((b * t, d))?;
-        let logits = h_flat.matmul(&lm_head_weight.to_dtype(DType::F32)?.t()?)?;
+        let logits = h_flat.matmul(&self.lm_head_weight_t)?;
         logits.reshape((b, t, self.config.vocab_size))
     }
 
