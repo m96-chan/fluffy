@@ -37,6 +37,11 @@ async fn run(text: String, wav_path: PathBuf, out_path: Option<PathBuf>) {
         .expect("TTS engine init failed");
     tracing::info!("Engine initialized in {:.1}s", t0.elapsed().as_secs_f32());
 
+    tracing::info!("Warmup...");
+    let t_warm = Instant::now();
+    engine.warmup().ok();
+    tracing::info!("Warmup done in {:.1}ms", t_warm.elapsed().as_secs_f64() * 1000.0);
+
     let t1 = Instant::now();
     let pcm = engine
         .synthesize_blocking(&text)

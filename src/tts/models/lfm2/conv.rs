@@ -14,8 +14,7 @@ use candle_nn::{linear_no_bias, Linear, Module, VarBuilder};
 /// During generation (single token), uses a ring buffer of size L_cache.
 pub struct Lfm2ShortConv {
     in_proj: Linear,
-    conv_weight: Tensor,           // shape: (dim, 1, L_cache) — prefill path
-    conv_weight_squeezed: Tensor,  // shape: (dim, L_cache) — cached for generation
+    conv_weight: Tensor, // shape: (dim, L_cache) — depthwise kernel (squeezed)
     out_proj: Linear,
     dim: usize,
     l_cache: usize,
@@ -25,15 +24,13 @@ impl Lfm2ShortConv {
     pub fn load(vb: VarBuilder, dim: usize, l_cache: usize) -> Result<Self> {
         // in_proj: (3*dim, dim) — projects to b_gate, c_gate, x_val
         let in_proj = linear_no_bias(dim, 3 * dim, vb.pp("in_proj"))?;
-        // conv weight: (dim, 1, L_cache) — depthwise conv1d
-        let conv_weight = vb.get((dim, 1, l_cache), "conv.weight")?;
+        // conv weight: (dim, 1, L_cache) on disk → squeeze to (dim, L_cache)
+        let conv_weight = vb.get((dim, 1, l_cache), "conv.weight")?.squeeze(1)?;
         let out_proj = linear_no_bias(dim, dim, vb.pp("out_proj"))?;
 
-        let conv_weight_squeezed = conv_weight.squeeze(1)?; // (dim, L_cache)
         Ok(Self {
             in_proj,
             conv_weight,
-            conv_weight_squeezed,
             out_proj,
             dim,
             l_cache,
@@ -68,8 +65,19 @@ impl Lfm2ShortConv {
             let pad = Tensor::zeros((b, self.dim, self.l_cache - 1), bx_t.dtype(), bx_t.device())?;
             let padded = Tensor::cat(&[&pad, &bx_t], 2)?; // (B, D, T + L_cache - 1)
 
-            // Depthwise conv1d: groups=dim
-            let out = depthwise_conv1d(&padded, &self.conv_weight, self.dim)?;
+            // Depthwise conv1d via narrow + broadcast_mul (avoids groups=2048 loop)
+            // output[:, c, p] = sum_k input[:, c, p+k] * w[c, k]
+            // conv_weight_squeezed: (D, L_cache) → narrow to (D, 1) → unsqueeze to (1, D, 1)
+            let w = &self.conv_weight;
+            let mut out = padded
+                .narrow(2, 0, t)?
+                .broadcast_mul(&w.narrow(1, 0, 1)?.unsqueeze(0)?)?;
+            for k in 1..self.l_cache {
+                out = (out
+                    + padded
+                        .narrow(2, k, t)?
+                        .broadcast_mul(&w.narrow(1, k, 1)?.unsqueeze(0)?)?)?;
+            }
             // out: (B, D, T)
 
             // Update conv_state with the last L_cache values
@@ -118,7 +126,7 @@ impl Lfm2ShortConv {
             // Apply conv: sum over the L_cache window (uses pre-squeezed weight)
             // state: (B, D, L_cache), conv_weight_squeezed: (D, L_cache)
             let out = state
-                .broadcast_mul(&self.conv_weight_squeezed.unsqueeze(0)?)?
+                .broadcast_mul(&self.conv_weight.unsqueeze(0)?)?
                 .sum(2)?; // (B, D)
 
             *conv_state = Some(state);
@@ -129,15 +137,4 @@ impl Lfm2ShortConv {
         let y = (&c_gate * &conv_out)?;
         self.out_proj.forward(&y)
     }
-}
-
-/// Depthwise Conv1d: each channel is convolved independently.
-/// input: (B, D, T), weight: (D, 1, K) → output: (B, D, T - K + 1)
-fn depthwise_conv1d(input: &Tensor, weight: &Tensor, groups: usize) -> Result<Tensor> {
-    // Use candle's conv1d with groups=dim for depthwise
-    let _cfg = candle_nn::Conv1dConfig {
-        groups,
-        ..Default::default()
-    };
-    input.conv1d(weight, 0, 1, 1, groups)
 }

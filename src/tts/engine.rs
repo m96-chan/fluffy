@@ -151,6 +151,25 @@ impl TtsEngine {
         })
     }
 
+    /// Run a short warmup forward pass to trigger cuBLAS JIT kernel compilation.
+    /// Without this, the first real inference pays ~800ms of JIT overhead.
+    pub fn warmup(&self) -> Result<(), AppError> {
+        use super::models::lfm2::generate::{build_prompt, GenerateParams};
+        let prompt = build_prompt("a");
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| AppError::Tts(format!("Tokenize: {e}")))?;
+        let input_ids: Vec<u32> = encoding.get_ids().to_vec();
+        let params = GenerateParams {
+            max_tokens: 1,
+            eos_token_id: self.lfm2_config.eos_token_id,
+            ..GenerateParams::default()
+        };
+        let _ = generate(&self.lfm2, &input_ids, &params, &self.device);
+        Ok(())
+    }
+
     /// Synthesize speech from text. Returns PCM f32 samples at the codec's sample rate.
     pub fn synthesize_blocking(&self, text: &str) -> Result<Vec<f32>, AppError> {
         // Step 1: Build prompt and tokenize
@@ -194,6 +213,7 @@ impl TtsEngine {
         }
 
         // Step 4: Decode with MioCodec
+        let t_miocodec = std::time::Instant::now();
         let num_tokens = codec_tokens.len();
         let token_tensor = Tensor::from_vec(codec_tokens, (num_tokens,), &self.device)
             .map_err(|e| AppError::Tts(format!("Token tensor: {e}")))?;
@@ -203,12 +223,16 @@ impl TtsEngine {
             .forward_wave(&token_tensor, &self.speaker_embedding)
             .map_err(|e| AppError::Tts(format!("MioCodec decode: {e}")))?;
 
-        // Convert to f32 Vec
+        // Convert to f32 Vec (D2H transfer)
+        let t_d2h = std::time::Instant::now();
+        let miocodec_ms = t_d2h.duration_since(t_miocodec).as_secs_f64() * 1000.0;
         let pcm: Vec<f32> = waveform
             .to_dtype(DType::F32)
             .map_err(|e| AppError::Tts(format!("To f32: {e}")))?
             .to_vec1()
             .map_err(|e| AppError::Tts(format!("To vec: {e}")))?;
+        let d2h_ms = t_d2h.elapsed().as_secs_f64() * 1000.0;
+        info!("MioCodec: {miocodec_ms:.1}ms, D2H: {d2h_ms:.1}ms ({} samples)", pcm.len());
 
         // Peak-normalize to -1dBFS (0.89) for audible playback
         let peak = pcm.iter().copied().fold(0.0f32, |a, x| a.max(x.abs()));

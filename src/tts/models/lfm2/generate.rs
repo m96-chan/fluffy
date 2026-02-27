@@ -40,11 +40,15 @@ pub fn generate(
     let (mut conv_states, mut kv_caches) = model.init_state();
 
     // Prefill: process all input tokens at once
+    let t_prefill = std::time::Instant::now();
     let logits = model.forward(&input, &mut conv_states, &mut kv_caches, 0)?;
 
     // Get logits for the last position
     let seq_len = input_ids.len();
     let mut last_logits = logits.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+    // Force GPU sync to get accurate prefill time (D2H of one scalar)
+    let _ = last_logits.sum_all()?.to_scalar::<f32>();
+    info!("Prefill: {} tokens in {:.1}ms", seq_len, t_prefill.elapsed().as_secs_f64() * 1000.0);
 
     // Diagnostic: show top-5 logits from prefill (expensive D2H — debug only)
     if tracing::enabled!(tracing::Level::DEBUG) {
@@ -84,9 +88,10 @@ pub fn generate(
         }
         generated.push(next_token);
 
-        if step % 100 == 99 {
+        if step < 3 || step % 100 == 99 {
             let elapsed = gen_start.elapsed().as_secs_f32();
-            info!("  step {}: tok/s = {:.1}, last_id = {next_token}", step + 1, (step + 1) as f32 / elapsed);
+            info!("  step {}: tok/s = {:.1}, elapsed = {:.1}ms, last_id = {next_token}",
+                step + 1, (step + 1) as f32 / elapsed, elapsed * 1000.0);
         }
 
         // Forward pass — next_input already on device (no H2D for token)

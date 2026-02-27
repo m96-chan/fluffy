@@ -201,8 +201,6 @@ impl Lfm2ForCausalLM {
         seq_offset: usize,
     ) -> Result<Tensor> {
         let mut h = self.embed_tokens.forward(input_ids)?;
-        // NOTE: embedding_norm is the FINAL layer norm, applied AFTER all layers
-        // (not before — the Python reference confirms this)
 
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut conv_states[i], &mut kv_caches[i], seq_offset)?;
