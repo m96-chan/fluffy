@@ -5,3 +5,10 @@ assets/models/
 
 # Animation files — convert from Mixamo FBX using tools/convert_anim.sh
 assets/anims/
+
+# Source FBX files (local working assets)
+assets/fbx/
+
+assets/voice/
+
+.env

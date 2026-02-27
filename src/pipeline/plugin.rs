@@ -2,16 +2,75 @@
 
 use bevy::prelude::*;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::audio::playback::PlaybackEngine;
 use crate::events::PipelineMessage;
 use crate::state::{AppConfig, ConfigReady, PipelineState, WhisperModel};
+use crate::tts::client as tts_client;
 
 pub struct PipelinePlugin;
 
 impl Plugin for PipelinePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, toggle_pipeline);
+        app.add_systems(Startup, (log_pipeline_config, speak_startup_greeting))
+            .add_systems(Update, toggle_pipeline);
     }
+}
+
+fn log_pipeline_config(config: Res<AppConfig>) {
+    let key_state = if config.api_key.is_empty() { "missing" } else { "set" };
+    info!(
+        "Pipeline config: api_key={}, model={}, anthropic_api_url={}, whisper_model_path={}, tts_clone_bin={}, tts_clone_voice_wav={}",
+        key_state,
+        config.model,
+        config.anthropic_api_url,
+        config.whisper_model_path.display(),
+        config.tts_clone_bin,
+        config.tts_clone_voice_wav.display()
+    );
+}
+
+fn speak_startup_greeting(config: Res<AppConfig>) {
+    let cfg = config.clone();
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!("Startup TTS: failed to create runtime: {}", e);
+                return;
+            }
+        };
+
+        let playback = match PlaybackEngine::new() {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Startup TTS: failed to init playback: {}", e);
+                return;
+            }
+        };
+
+        let mut pcm_rx = match runtime.block_on(tts_client::synthesize(&cfg, "おはよう")) {
+            Ok(rx) => rx,
+            Err(e) => {
+                warn!("Startup TTS: synthesize failed: {}", e);
+                return;
+            }
+        };
+
+        runtime.block_on(async {
+            while let Some(chunk) = pcm_rx.recv().await {
+                playback.queue_chunk(chunk);
+            }
+        });
+
+        while !playback.is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
 }
 
 /// Space → start pipeline, Space again → stop.

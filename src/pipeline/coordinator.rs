@@ -155,6 +155,7 @@ async fn process_llm_turn(
     let (llm_tx, mut llm_rx) = mpsc::channel(64);
 
     let api_key = config.api_key.clone();
+    let api_url = config.anthropic_api_url.clone();
     let model = config.model.clone();
     let system = config.system_prompt.clone();
     let msgs = conversation.clone();
@@ -162,7 +163,7 @@ async fn process_llm_turn(
 
     tokio::spawn(async move {
         if let Err(e) = llm_client::stream_completion(
-            &api_key, &model, &system, msgs, tools_clone, llm_tx,
+            &api_key, &api_url, &model, &system, msgs, tools_clone, llm_tx,
         ).await {
             error!("LLM error: {}", e);
         }
@@ -171,7 +172,7 @@ async fn process_llm_turn(
     let mut sentence_splitter = SentenceSplitter::new();
     let mut full_response = String::new();
 
-    // PCM bridge: tokio mpsc → std mpsc → rodio (which is !Send)
+    // PCM bridge: tokio mpsc -> std mpsc -> rodio (which is !Send)
     let (pcm_bridge_tx, pcm_bridge_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let msg_tx_play = msg_tx.clone();
 
@@ -180,7 +181,6 @@ async fn process_llm_turn(
             Ok(engine) => {
                 while let Ok(chunk) = pcm_bridge_rx.recv() {
                     let amp = lip_sync::compute_lip_sync_amplitude(&chunk);
-                    // Fire-and-forget; Bevy reads these next frame
                     let _ = msg_tx_play.try_send(PipelineMessage::LipSyncAmplitude { amplitude: amp });
                     engine.queue_chunk(chunk);
                 }
@@ -196,13 +196,13 @@ async fn process_llm_turn(
         }
     });
 
-    let tts_url = config.tts_url.clone();
+    let tts_config = (*config).clone();
     let (sentence_tts_tx, mut sentence_tts_rx) = mpsc::channel::<String>(4);
     let msg_tx_tts = msg_tx.clone();
 
     tokio::spawn(async move {
         while let Some(sentence) = sentence_tts_rx.recv().await {
-            match tts_client::synthesize(&tts_url, &sentence).await {
+            match tts_client::synthesize(&tts_config, &sentence).await {
                 Ok(mut pcm_rx) => {
                     while let Some(chunk) = pcm_rx.recv().await {
                         let _ = tts_tx.send(chunk).await;

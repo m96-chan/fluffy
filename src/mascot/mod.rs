@@ -14,6 +14,8 @@ impl Plugin for MascotPlugin {
             .insert_resource(MascotClipSet::default())
             .insert_resource(ExitGreetingRequest::default())
             .insert_resource(BlinkState::default())
+            .insert_resource(MascotBehaviorState::default())
+            .insert_resource(YawnSchedule::default())
             .add_systems(
                 Update,
                 (
@@ -24,8 +26,8 @@ impl Plugin for MascotPlugin {
                     prepare_mascot_clips,
                     setup_player_graph,
                     handle_window_close_request,
-                    drive_mascot_animation,
                     handle_pipeline_messages,
+                    drive_mascot_animation,
                 ),
             );
     }
@@ -45,13 +47,19 @@ struct MascotFitted;
 
 #[derive(Component)]
 struct MascotAnimState {
+    idle_node: AnimationNodeIndex,
+    thinking_node: AnimationNodeIndex,
+    yawn_node: Option<AnimationNodeIndex>,
     greeting_node: Option<AnimationNodeIndex>,
     phase: MascotPhase,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MascotPhase {
+    StartupGreeting,
     Idle,
+    Thinking,
+    Yawn,
     ExitGreeting,
     Exiting,
 }
@@ -59,6 +67,8 @@ enum MascotPhase {
 #[derive(Resource, Default)]
 struct MascotClipSet {
     idle: Option<Handle<AnimationClip>>,
+    thinking: Option<Handle<AnimationClip>>,
+    yawn: Option<Handle<AnimationClip>>,
     greeting: Option<Handle<AnimationClip>>,
 }
 
@@ -82,6 +92,42 @@ impl Default for BlinkState {
     }
 }
 
+#[derive(Resource, Default)]
+struct MascotBehaviorState {
+    thinking: bool,
+}
+
+#[derive(Resource)]
+struct YawnSchedule {
+    next_at_secs: f64,
+    rng_state: u64,
+}
+
+impl Default for YawnSchedule {
+    fn default() -> Self {
+        Self {
+            next_at_secs: 0.0,
+            rng_state: 0x1234_5678_9abc_def0,
+        }
+    }
+}
+
+impl YawnSchedule {
+    fn next_interval_secs(&mut self) -> f64 {
+        // Deterministic LCG random in [150, 210] sec around 3 minutes.
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
+        let unit = ((self.rng_state >> 32) as f64) / (u32::MAX as f64);
+        150.0 + unit * 60.0
+    }
+
+    fn bump_from(&mut self, now_secs: f64) {
+        self.next_at_secs = now_secs + self.next_interval_secs();
+    }
+}
+
 fn spawn_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         Camera3d::default(),
@@ -89,7 +135,7 @@ fn spawn_scene(mut commands: Commands, asset_server: Res<AssetServer>) {
         Camera {
             order: 0,
             viewport: Some(bevy::camera::Viewport {
-                physical_position: UVec2::ZERO,
+                physical_position: UVec2::new(crate::chat::state::CHAT_PANEL_WIDTH, 0),
                 physical_size: UVec2::new(
                     crate::chat::state::MASCOT_WIDTH,
                     crate::chat::state::WINDOW_HEIGHT,
@@ -304,6 +350,8 @@ fn prepare_mascot_clips(
 
     let mut idle = None;
     let mut greeting = None;
+    let mut thinking = None;
+    let mut yawn = None;
 
     for (name, clip) in &gltf.named_animations {
         let n = name.to_ascii_lowercase();
@@ -313,6 +361,12 @@ fn prepare_mascot_clips(
         if greeting.is_none() && (n.contains("greet") || n.contains("standing")) {
             greeting = Some(clip.clone());
         }
+        if thinking.is_none() && n.contains("thinking") {
+            thinking = Some(clip.clone());
+        }
+        if yawn.is_none() && n.contains("yawn") {
+            yawn = Some(clip.clone());
+        }
     }
 
     if idle.is_none() {
@@ -321,9 +375,13 @@ fn prepare_mascot_clips(
 
     clips.idle = idle;
     clips.greeting = greeting;
+    clips.thinking = thinking.or_else(|| clips.idle.clone());
+    clips.yawn = yawn;
     info!(
-        "Mascot clips: idle={}, greeting={}",
+        "Mascot clips: idle={}, thinking={}, yawn={}, greeting={}",
         clips.idle.is_some(),
+        clips.thinking.is_some(),
+        clips.yawn.is_some(),
         clips.greeting.is_some()
     );
 }
@@ -342,20 +400,37 @@ fn setup_player_graph(
         let mut transitions = AnimationTransitions::new();
         let mut graph = AnimationGraph::new();
         let idle_node = graph.add_clip(idle_clip.clone(), 1.0, graph.root);
+        let thinking_clip = clips.thinking.clone().unwrap_or(idle_clip.clone());
+        let thinking_node = graph.add_clip(thinking_clip, 1.0, graph.root);
+        let yawn_node = clips
+            .yawn
+            .clone()
+            .map(|h| graph.add_clip(h, 1.0, graph.root));
         let greeting_node = clips
             .greeting
             .clone()
             .map(|h| graph.add_clip(h, 1.0, graph.root));
         let graph_handle = graphs.add(graph);
 
-        transitions
-            .play(&mut player, idle_node, Duration::from_millis(300))
-            .set_repeat(bevy::animation::RepeatAnimation::Forever);
+        let initial_phase = if let Some(greet) = greeting_node {
+            transitions
+                .play(&mut player, greet, Duration::from_millis(180))
+                .set_repeat(bevy::animation::RepeatAnimation::Never);
+            MascotPhase::StartupGreeting
+        } else {
+            transitions
+                .play(&mut player, idle_node, Duration::from_millis(180))
+                .set_repeat(bevy::animation::RepeatAnimation::Forever);
+            MascotPhase::Idle
+        };
         commands.entity(entity).insert(MascotAnimState {
+            idle_node,
+            thinking_node,
+            yawn_node,
             greeting_node,
-            phase: MascotPhase::Idle,
+            phase: initial_phase,
         });
-        info!("Mascot: idle started");
+        info!("Mascot: animation graph initialized; startup={:?}", initial_phase);
 
         commands.entity(entity).insert(AnimationGraphHandle(graph_handle));
         commands.entity(entity).insert(transitions);
@@ -373,12 +448,26 @@ fn handle_window_close_request(
 }
 
 fn drive_mascot_animation(
+    time: Res<Time>,
     mut request: ResMut<ExitGreetingRequest>,
+    behavior: Res<MascotBehaviorState>,
+    mut yawn: ResMut<YawnSchedule>,
     mut app_exit: MessageWriter<AppExit>,
     mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions, &mut MascotAnimState)>,
 ) {
+    let now = time.elapsed_secs_f64();
+    if yawn.next_at_secs <= 0.0 {
+        yawn.bump_from(now);
+    }
+
+    let desired_loop = if behavior.thinking {
+        MascotPhase::Thinking
+    } else {
+        MascotPhase::Idle
+    };
+
     for (mut player, mut transitions, mut state) in &mut players {
-        if request.requested && state.phase == MascotPhase::Idle {
+        if request.requested && state.phase != MascotPhase::ExitGreeting && state.phase != MascotPhase::Exiting {
             if let Some(greet) = state.greeting_node {
                 transitions
                     .play(&mut player, greet, Duration::from_millis(300))
@@ -394,6 +483,24 @@ fn drive_mascot_animation(
         }
 
         match state.phase {
+            MascotPhase::StartupGreeting => {
+                let finished = state
+                    .greeting_node
+                    .and_then(|n| player.animation(n))
+                    .map(|a| a.is_finished())
+                    .unwrap_or(true);
+                if finished {
+                    let node = if desired_loop == MascotPhase::Thinking {
+                        state.thinking_node
+                    } else {
+                        state.idle_node
+                    };
+                    transitions
+                        .play(&mut player, node, Duration::from_millis(180))
+                        .set_repeat(bevy::animation::RepeatAnimation::Forever);
+                    state.phase = desired_loop;
+                }
+            }
             MascotPhase::ExitGreeting => {
                 let finished = state
                     .greeting_node
@@ -406,15 +513,90 @@ fn drive_mascot_animation(
                     info!("Mascot: exit greeting finished; app exit sent");
                 }
             }
-            MascotPhase::Idle | MascotPhase::Exiting => {}
+            MascotPhase::Yawn => {
+                let finished = state
+                    .yawn_node
+                    .and_then(|n| player.animation(n))
+                    .map(|a| a.is_finished())
+                    .unwrap_or(true);
+                if finished {
+                    let node = if desired_loop == MascotPhase::Thinking {
+                        state.thinking_node
+                    } else {
+                        state.idle_node
+                    };
+                    transitions
+                        .play(&mut player, node, Duration::from_millis(180))
+                        .set_repeat(bevy::animation::RepeatAnimation::Forever);
+                    state.phase = desired_loop;
+                    yawn.bump_from(now);
+                }
+            }
+            MascotPhase::Idle | MascotPhase::Thinking => {
+                if !behavior.thinking && !request.requested && now >= yawn.next_at_secs {
+                    if let Some(yawn_node) = state.yawn_node {
+                        transitions
+                            .play(&mut player, yawn_node, Duration::from_millis(120))
+                            .set_repeat(bevy::animation::RepeatAnimation::Never);
+                        state.phase = MascotPhase::Yawn;
+                        info!("Mascot: yawn started");
+                        continue;
+                    } else {
+                        yawn.bump_from(now);
+                    }
+                }
+
+                if state.phase != desired_loop {
+                    let node = if desired_loop == MascotPhase::Thinking {
+                        state.thinking_node
+                    } else {
+                        state.idle_node
+                    };
+                    transitions
+                        .play(&mut player, node, Duration::from_millis(180))
+                        .set_repeat(bevy::animation::RepeatAnimation::Forever);
+                    state.phase = desired_loop;
+                }
+            }
+            MascotPhase::Exiting => {}
         }
     }
 }
 
-fn handle_pipeline_messages(mut reader: MessageReader<PipelineMessage>) {
+fn handle_pipeline_messages(
+    mut reader: MessageReader<PipelineMessage>,
+    time: Res<Time>,
+    mut behavior: ResMut<MascotBehaviorState>,
+    mut yawn: ResMut<YawnSchedule>,
+) {
+    let now = time.elapsed_secs_f64();
     for msg in reader.read() {
-        if let PipelineMessage::PhaseChanged(phase) = msg {
-            info!("Phase: {:?}", phase);
+        match msg {
+            PipelineMessage::PhaseChanged(phase) => {
+                info!("Phase: {:?}", phase);
+                if matches!(phase, crate::events::MascotPhase::Thinking) {
+                    behavior.thinking = true;
+                    yawn.bump_from(now);
+                } else if !matches!(phase, crate::events::MascotPhase::Processing) {
+                    behavior.thinking = false;
+                }
+            }
+            PipelineMessage::SttResult { .. } => {
+                yawn.bump_from(now);
+                behavior.thinking = true;
+            }
+            PipelineMessage::LlmToken { .. } => {
+                // AI response has started; leave thinking animation.
+                behavior.thinking = false;
+                yawn.bump_from(now);
+            }
+            PipelineMessage::LlmDone => {
+                behavior.thinking = false;
+                yawn.bump_from(now);
+            }
+            PipelineMessage::EmotionChange { .. }
+            | PipelineMessage::LipSyncAmplitude { .. }
+            | PipelineMessage::PipelineError { .. } => {}
         }
     }
 }

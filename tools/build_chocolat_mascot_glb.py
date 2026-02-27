@@ -69,13 +69,42 @@ def build_bone_map_for_target(target_arm):
 
 def parse_args():
     if "--" not in sys.argv:
-        print("Usage: blender --background --python tools/build_chocolat_mascot_glb.py -- chocolat.fbx idle.fbx greeting.fbx out.glb")
+        print("Usage:")
+        print("  blender --background --python tools/build_chocolat_mascot_glb.py -- chocolat.fbx idle.fbx greeting.fbx out.glb")
+        print("  blender --background --python tools/build_chocolat_mascot_glb.py -- chocolat.fbx out.glb [anim1.fbx anim2.fbx ...]")
         sys.exit(1)
     args = sys.argv[sys.argv.index("--") + 1 :]
-    if len(args) != 4:
-        print("Error: need chocolat.fbx idle.fbx greeting.fbx out.glb")
+    # Backward compatible mode:
+    #   chocolat.fbx idle.fbx greeting.fbx out.glb
+    if len(args) == 4:
+        chocolat_fbx, idle_fbx, greeting_fbx, out_glb = args
+        return (
+            os.path.abspath(chocolat_fbx),
+            os.path.abspath(out_glb),
+            [
+                (os.path.abspath(idle_fbx), "Idle"),
+                (os.path.abspath(greeting_fbx), "Greeting"),
+            ],
+        )
+
+    # New mode:
+    #   chocolat.fbx out.glb [anim1.fbx anim2.fbx ...]
+    if len(args) < 2:
+        print("Error: need at least chocolat.fbx and out.glb")
         sys.exit(1)
-    return tuple(os.path.abspath(a) for a in args)
+    chocolat_fbx = os.path.abspath(args[0])
+    out_glb = os.path.abspath(args[1])
+    anim_paths = [os.path.abspath(a) for a in args[2:]]
+    return chocolat_fbx, out_glb, [(p, action_name_from_path(p)) for p in anim_paths]
+
+
+def action_name_from_path(path):
+    stem = os.path.splitext(os.path.basename(path))[0]
+    # Mixamo exports are often named like "X Bot@Idle"
+    if "@" in stem:
+        stem = stem.split("@", 1)[1]
+    stem = stem.replace("_", " ").strip()
+    return stem or "Animation"
 
 
 def clear_scene():
@@ -136,9 +165,14 @@ def remap_mixamo_bones(source_arm, bone_map):
 
 
 def relink_chocolat_textures(chocolat_fbx_path):
-    base_dir = os.path.dirname(os.path.dirname(chocolat_fbx_path))
-    tex_dir = os.path.join(base_dir, "Texture")
-    if not os.path.isdir(tex_dir):
+    fbx_dir = os.path.dirname(chocolat_fbx_path)
+    candidate_tex_dirs = [
+        os.path.join(fbx_dir, "Texture"),  # e.g. assets/fbx/Texture
+        os.path.join(os.path.dirname(fbx_dir), "Texture"),  # e.g. Chocolat_v1.02/Texture
+    ]
+    tex_dir = next((d for d in candidate_tex_dirs if os.path.isdir(d)), None)
+    if not tex_dir:
+        print(f"Texture directory not found. tried={candidate_tex_dirs}")
         return
     remap = {
         "face": "Chocolat_Face.png",
@@ -457,8 +491,24 @@ def bake_from_source_fbx(target_arm, source_fbx, action_name):
 
 
 def main():
-    chocolat_fbx, idle_fbx, greeting_fbx, out_glb = parse_args()
-    for p in (chocolat_fbx, idle_fbx, greeting_fbx):
+    chocolat_fbx, out_glb, anim_specs = parse_args()
+
+    if not anim_specs:
+        # Auto-discover all sibling FBX files as animation sources.
+        fbx_dir = os.path.dirname(chocolat_fbx)
+        for name in sorted(os.listdir(fbx_dir)):
+            if not name.lower().endswith(".fbx"):
+                continue
+            p = os.path.join(fbx_dir, name)
+            if os.path.abspath(p) == os.path.abspath(chocolat_fbx):
+                continue
+            anim_specs.append((os.path.abspath(p), action_name_from_path(p)))
+
+    if not anim_specs:
+        print("Error: no animation FBX found")
+        sys.exit(1)
+
+    for p in [chocolat_fbx] + [p for p, _ in anim_specs]:
         if not os.path.exists(p):
             print(f"Error: not found: {p}")
             sys.exit(1)
@@ -471,10 +521,13 @@ def main():
         sys.exit(1)
 
     relink_chocolat_textures(chocolat_fbx)
-    bake_from_source_fbx(target_arm, idle_fbx, "Idle")
-    bake_from_source_fbx(target_arm, greeting_fbx, "Greeting")
+    baked_actions = []
+    for source_fbx, action_name in anim_specs:
+        print(f"Bake: {os.path.basename(source_fbx)} -> {action_name}")
+        bake_from_source_fbx(target_arm, source_fbx, action_name)
+        baked_actions.append(action_name)
 
-    keep_actions(["Idle", "Greeting"])
+    keep_actions(baked_actions)
     apply_default_shape_key_presets()
     prune_shape_keys()
     export_glb(out_glb, target_arm)

@@ -1,5 +1,5 @@
 /// Bevy UI plugin for the chat panel.
-/// Layout: left 400px = character (3D viewport), right 350px = chat panel.
+/// Layout: left 350px = chat panel, right 400px = character (3D viewport).
 /// Window is fixed at 750×600. T key toggles chat panel visibility.
 
 use bevy::prelude::*;
@@ -38,15 +38,7 @@ fn setup_ui(mut commands: Commands) {
             ..default()
         })
         .with_children(|root| {
-            // Left spacer — 3D camera renders here
-            root.spawn(Node {
-                width: Val::Px(MASCOT_WIDTH as f32),
-                height: Val::Percent(100.0),
-                flex_shrink: 0.0,
-                ..default()
-            });
-
-            // Right: chat panel
+            // Left: chat panel
             root.spawn((
                 ChatPanel,
                 Node {
@@ -87,6 +79,14 @@ fn setup_ui(mut commands: Commands) {
                         ..default()
                     },
                 ));
+            });
+
+            // Right spacer — 3D camera renders here
+            root.spawn(Node {
+                width: Val::Px(MASCOT_WIDTH as f32),
+                height: Val::Percent(100.0),
+                flex_shrink: 0.0,
+                ..default()
             });
         });
 }

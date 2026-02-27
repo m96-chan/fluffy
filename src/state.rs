@@ -8,8 +8,11 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Serialize, Deserialize, Resource)]
 pub struct AppConfig {
     pub api_key: String,
+    pub anthropic_api_url: String,
     pub model: String,
-    pub tts_url: String,
+    pub tts_clone_bin: String,
+    pub tts_clone_voice_wav: PathBuf,
+    pub tts_clone_model: String,
     pub vad_threshold: f32,
     pub vad_silence_hold_frames: usize,
     pub audio_device: Option<String>,
@@ -21,10 +24,20 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-            model: "claude-sonnet-4-6".to_string(),
-            tts_url: std::env::var("FLUFFY_TTS_URL")
-                .unwrap_or_else(|_| "http://localhost:7860".to_string()),
+            api_key: std::env::var("ANTHROPIC_API_KEY")
+                .or_else(|_| std::env::var("CLAUDE_API_KEY"))
+                .unwrap_or_default(),
+            anthropic_api_url: std::env::var("ANTHROPIC_API_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com/v1/messages".to_string()),
+            model: std::env::var("ANTHROPIC_MODEL")
+                .unwrap_or_else(|_| "claude-sonnet-4-6".to_string()),
+            tts_clone_bin: std::env::var("FLUFFY_TTS_BIN")
+                .unwrap_or_else(|_| "tts".to_string()),
+            tts_clone_voice_wav: std::env::var("FLUFFY_TTS_CLONE_VOICE_WAV")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("assets/voice/このボイス.wav")),
+            tts_clone_model: std::env::var("FLUFFY_TTS_CLONE_MODEL")
+                .unwrap_or_else(|_| "tts_models/multilingual/multi-dataset/xtts_v2".to_string()),
             vad_threshold: 0.02,
             vad_silence_hold_frames: 25,
             audio_device: None,
@@ -35,6 +48,9 @@ impl Default for AppConfig {
 }
 
 fn default_whisper_model_path() -> PathBuf {
+    if let Ok(p) = std::env::var("WHISPER_MODEL_PATH") {
+        return PathBuf::from(p);
+    }
     // XDG data dir or fallback to ~/.local/share/fluffy/models/
     let base = std::env::var("FLUFFY_MODEL_DIR")
         .map(PathBuf::from)
@@ -180,13 +196,5 @@ mod tests {
             receiver: None,
         };
         assert!(!state.is_running());
-    }
-
-    #[test]
-    fn tts_url_reads_from_env() {
-        std::env::set_var("FLUFFY_TTS_URL", "http://myserver:8080");
-        let cfg = AppConfig::default();
-        assert_eq!(cfg.tts_url, "http://myserver:8080");
-        std::env::remove_var("FLUFFY_TTS_URL");
     }
 }
