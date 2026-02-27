@@ -1,0 +1,67 @@
+[package]
+name = "fluffy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+
+[[bin]]
+name = "fluffy"
+path = "src/main.rs"
+
+[dependencies]
+# Game engine
+bevy = { version = "0.18", features = ["dynamic_linking"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7" }
+tokio-stream = "0.1"
+
+# Audio
+cpal = "0.15"
+rodio = { version = "0.19", default-features = false, features = ["symphonia-wav"] }
+
+# STT
+whisper-rs = "0.11"
+
+# HTTP / LLM / TTS
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+futures-util = "0.3"
+
+# GLTF / VRM parsing
+gltf = { version = "1.4", features = ["KHR_lights_punctual", "KHR_materials_unlit", "extras"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+thiserror = "1"
+
+# XDG dirs
+dirs-next = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+dirs-next = "2"
+
+[patch.crates-io]
+bevy_mesh = { path = "patches/bevy_mesh" }
+bevy_pbr = { path = "patches/bevy_pbr" }
+
+[features]
+default = []
+# Release build: remove dynamic_linking
+release = []
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
