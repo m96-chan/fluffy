@@ -44,10 +44,6 @@ safetensors = "0.5"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 hf-hub = { version = "0.4", features = ["tokio"] }
 
-# Signal processing
-rustfft = "6"
-num-complex = "0.4"
-
 # GLTF / VRM parsing
 gltf = { version = "1.4", features = ["KHR_lights_punctual", "KHR_materials_unlit", "extras"] }
 
