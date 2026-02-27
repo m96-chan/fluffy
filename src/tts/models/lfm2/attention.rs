@@ -77,14 +77,14 @@ impl Lfm2Attention {
         let q = self.q_layernorm.forward(&q)?;
         let k = self.k_layernorm.forward(&k)?;
 
-        // Transpose: (B, H, T, D), contiguous for matmul
-        let q = q.transpose(1, 2)?.contiguous()?;
-        let k = k.transpose(1, 2)?.contiguous()?;
-        let v = v.transpose(1, 2)?.contiguous()?;
+        // Transpose: (B, H, T, D) — cuBLAS handles strided layout via lda
+        let q = q.transpose(1, 2)?;
+        let k = k.transpose(1, 2)?;
+        let v = v.transpose(1, 2)?;
 
         // Apply RoPE (uses cached freq tensor — no H2D)
-        let q = apply_rope_cached(&q, seq_offset, &self.rope_freq)?.contiguous()?;
-        let k = apply_rope_cached(&k, seq_offset, &self.rope_freq)?.contiguous()?;
+        let q = apply_rope_cached(&q, seq_offset, &self.rope_freq)?;
+        let k = apply_rope_cached(&k, seq_offset, &self.rope_freq)?;
 
         // KV cache handling
         let (k, v) = match kv_cache.take() {
@@ -103,7 +103,7 @@ impl Lfm2Attention {
 
         // Scaled dot-product attention
         let scale = (self.head_dim as f64).sqrt();
-        let attn_weights = (q.matmul(&k.t()?.contiguous()?)? / scale)?;
+        let attn_weights = (q.matmul(&k.t()?)? / scale)?;
 
         // Causal mask (only for prefill; single token needs no mask)
         let kv_len = attn_weights.dim(3)?;
