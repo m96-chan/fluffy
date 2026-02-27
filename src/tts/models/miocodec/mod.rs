@@ -129,12 +129,16 @@ impl MioCodecDecoder {
         token_indices: &Tensor,
         speaker_embedding: &Tensor,
     ) -> Result<Tensor> {
+        use std::time::Instant;
+        let t0 = Instant::now();
+
         // FSQ decode: index → 5-dim → Linear(5, 768) → (1, seq, 768)
         let x = self.fsq.forward(token_indices)?;
         let x = x.unsqueeze(0)?; // (1, seq, 768)
 
         // wave_prenet: Transformer 768→512 → (1, seq, 512)
         let x = self.wave_prenet.forward(&x, None)?;
+        let t1 = Instant::now();
 
         // Conv transpose: (1, 512, seq) → (1, 512, seq*2)
         let x = x.transpose(1, 2)?;
@@ -146,21 +150,35 @@ impl MioCodecDecoder {
 
         // wave_prior_net: ResNetStack
         let x = self.wave_prior_net.forward(&x)?;
+        let t2 = Instant::now();
 
         // wave_decoder: Transformer with AdaLN-Zero, conditioned on speaker embedding
         let x = x.transpose(1, 2)?;
         let speaker_emb = speaker_embedding.unsqueeze(0)?;
         let x = self.wave_decoder.forward(&x, Some(&speaker_emb))?;
         let x = x.transpose(1, 2)?;
+        let t3 = Instant::now();
 
         // wave_post_net: ResNetStack
         let x = self.wave_post_net.forward(&x)?;
 
         // UpSampler: (1, 512, stft_len) → (1, 512, stft_len*9)
         let x = self.upsampler.forward(&x)?;
+        let t4 = Instant::now();
 
         // ISTFTHead: → waveform
         let wav = self.istft_head.forward(&x)?;
+        let t5 = Instant::now();
+
+        tracing::info!(
+            "MioCodec decode breakdown: prenet={:.0}ms conv+interp+prior={:.0}ms decoder={:.0}ms post+up={:.0}ms istft={:.0}ms total={:.0}ms",
+            t1.duration_since(t0).as_millis(),
+            t2.duration_since(t1).as_millis(),
+            t3.duration_since(t2).as_millis(),
+            t4.duration_since(t3).as_millis(),
+            t5.duration_since(t4).as_millis(),
+            t5.duration_since(t0).as_millis(),
+        );
 
         // Squeeze batch dim and return 1D waveform
         wav.squeeze(0)
