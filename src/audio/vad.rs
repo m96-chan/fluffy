@@ -41,8 +41,12 @@ impl VadState {
             VadInternalState::Silent => {
                 // Keep a rolling pre-roll buffer (limited to pre_roll_samples)
                 self.pre_roll_ring.push(frame.to_vec());
-                let total: usize = self.pre_roll_ring.iter().map(|f| f.len()).sum();
-                while total > self.pre_roll_samples + frame.len() {
+                while self.pre_roll_ring.iter().map(|f| f.len()).sum::<usize>()
+                    > self.pre_roll_samples + frame.len()
+                {
+                    if self.pre_roll_ring.is_empty() {
+                        break;
+                    }
                     self.pre_roll_ring.remove(0);
                 }
 
