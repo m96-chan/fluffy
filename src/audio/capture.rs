@@ -96,6 +96,29 @@ pub async fn start_capture(
                 )
                 .map_err(|e| AppError::Audio(e.to_string()))?
         }
+        SampleFormat::U8 => {
+            let tx = tx_clone;
+            device
+                .build_input_stream(
+                    &config.into(),
+                    move |data: &[u8], _| {
+                        let f32_data: Vec<f32> =
+                            data.iter().map(|&s| (s as f32 - 128.0) / 128.0).collect();
+                        handle_input(
+                            &f32_data,
+                            channels,
+                            needs_resample,
+                            resample_ratio,
+                            &mut input_buf,
+                            &mut resample_buffer,
+                            &tx,
+                        );
+                    },
+                    |e| error!("Audio stream error: {}", e),
+                    None,
+                )
+                .map_err(|e| AppError::Audio(e.to_string()))?
+        }
         fmt => {
             return Err(AppError::Audio(format!(
                 "Unsupported sample format: {:?}",
