@@ -82,8 +82,16 @@ pub async fn stream_completion(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(AppError::Llm(format!("API error {}: {}", status, body)));
+        let _body = response.text().await.unwrap_or_default();
+        let user_msg = match status.as_u16() {
+            401 => "通信に失敗しました。認証エラーです。",
+            429 => "通信に失敗しました。リクエストが多すぎます。少し待ってください。",
+            500..=599 => "通信に失敗しました。サーバーエラーです。",
+            _ => "通信に失敗しました。",
+        };
+        let _ = tx.send(LlmChunk::Token(format!("[neutral] {user_msg}"))).await;
+        let _ = tx.send(LlmChunk::Done).await;
+        return Ok(());
     }
 
     parse_sse_stream(response, tx).await
