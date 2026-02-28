@@ -89,7 +89,8 @@ pub async fn stream_completion(
             500..=599 => "通信に失敗しました。サーバーエラーです。",
             _ => "通信に失敗しました。",
         };
-        let _ = tx.send(LlmChunk::Token(format!("[neutral] {user_msg}"))).await;
+        let _ = tx.send(LlmChunk::Token("[sad]".to_string())).await;
+        let _ = tx.send(LlmChunk::Token(format!(" {user_msg}"))).await;
         let _ = tx.send(LlmChunk::Done).await;
         return Ok(());
     }

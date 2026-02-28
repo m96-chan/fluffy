@@ -71,16 +71,38 @@ impl AppConfig {
 }
 
 fn default_system_prompt() -> String {
-    r#"You are a friendly desktop mascot assistant named Fluffy.
+    // ~/.config/fluffy/system_prompt.txt があればそちらを使う
+    if let Some(path) = dirs_next::config_dir().map(|d| d.join("fluffy").join("system_prompt.txt"))
+    {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
 
-Guidelines:
-- Keep spoken responses concise (≤2 sentences before a code block)
-- Prefix your response with an emotion hint in square brackets: [happy], [thinking], [surprised], [sad], or [neutral]
-- Put code in markdown fenced blocks with the language specified (e.g. ```rust)
-- Code blocks will be shown in the chat overlay but not spoken aloud
-- Be warm, encouraging, and enthusiastic about helping
+    // 環境変数 FLUFFY_SYSTEM_PROMPT_FILE でもパス指定可
+    if let Ok(path) = std::env::var("FLUFFY_SYSTEM_PROMPT_FILE") {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
 
-Available tools: read_file, write_file, list_files, run_command
+    r#"あなたはデスクトップマスコットアシスタント「Fluffy」です。
+必ず日本語で返答してください。
+
+ガイドライン:
+- 発話は簡潔に（コードブロックの前は2文以内）
+- 返答の先頭に感情ヒントを角括弧で付けてください: [happy], [thinking], [surprised], [sad], [neutral]
+- コードはマークダウンのフェンスブロックで言語指定して書いてください（例: ```rust）
+- コードブロックはチャットオーバーレイに表示され、読み上げません
+- 温かく、前向きに、楽しく助けてあげてください
+
+利用可能なツール: read_file, write_file, list_files, run_command
 "#
     .to_string()
 }
