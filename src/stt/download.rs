@@ -83,8 +83,8 @@ async fn download_file(
         .map_err(AppError::Http)?;
 
     if !response.status().is_success() {
-        return Err(AppError::Download(format!(
-            "HTTP {} for {}",
+        return Err(AppError::Stt(format!(
+            "Download failed: HTTP {} for {}",
             response.status(),
             url
         )));
