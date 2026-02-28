@@ -9,10 +9,6 @@ name = "fluffy"
 path = "src/main.rs"
 
 [[bin]]
-name = "tts_test"
-path = "src/bin/tts_test.rs"
-
-[[bin]]
 name = "miocodec_test"
 path = "src/bin/miocodec_test.rs"
 
@@ -37,12 +33,12 @@ whisper-rs = "0.11"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 futures-util = "0.3"
 
-# Neural network inference (candle)
+# TTS (candle-based MioTTS)
+candle-miotts = "0.1"
+
+# Neural network inference (candle) — used by miocodec_test bin
 candle-core = { version = "0.9" }
 candle-nn = { version = "0.9" }
-safetensors = "0.5"
-tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
-hf-hub = { version = "0.4", features = ["tokio"] }
 
 # GLTF / VRM parsing
 gltf = { version = "1.4", features = ["KHR_lights_punctual", "KHR_materials_unlit", "extras"] }
@@ -76,7 +72,7 @@ default = []
 # Release build: remove dynamic_linking
 release = []
 # Enable CUDA GPU acceleration (requires nvcc / CUDA toolkit)
-cuda = ["candle-core/cuda", "candle-nn/cuda"]
+cuda = ["candle-miotts/cuda", "candle-core/cuda", "candle-nn/cuda"]
 
 [profile.dev]
 opt-level = 1

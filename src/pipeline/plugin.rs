@@ -52,7 +52,7 @@ fn init_tts_engine(mut commands: Commands, config: Res<AppConfig>) {
             }
         };
 
-        match runtime.block_on(crate::tts::engine::TtsEngine::initialize(&clone_wav)) {
+        match runtime.block_on(candle_miotts::engine::TtsEngine::initialize(&clone_wav)) {
             Ok(engine) => {
                 info!("TTS engine initialized — ready for synthesis");
                 // NOTE: We can't insert into Bevy World from a background thread directly.

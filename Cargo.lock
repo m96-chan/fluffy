@@ -1830,6 +1830,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-miotts"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccc3469a91c89fc8dcc8e8184937d454c3e6cadfafe243c64a453d019aff3224"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "hf-hub",
+ "rodio 0.19.0",
+ "safetensors 0.5.3",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokenizers",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "candle-nn"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2734,20 +2753,18 @@ dependencies = [
  "bevy",
  "bevy_mesh",
  "candle-core",
+ "candle-miotts",
  "candle-nn",
  "cpal",
  "dirs-next",
  "futures-util",
  "gltf",
- "hf-hub",
  "reqwest",
  "rodio 0.19.0",
- "safetensors 0.5.3",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tokenizers",
  "tokio",
  "tokio-stream",
  "tokio-util",

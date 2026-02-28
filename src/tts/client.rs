@@ -3,7 +3,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::error;
 
 use crate::error::AppError;
-use super::engine::TtsEngine;
+use candle_miotts::engine::TtsEngine;
 
 /// Synthesize speech using the local TTS engine.
 ///

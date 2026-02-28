@@ -10,9 +10,9 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{Module, VarBuilder};
 use std::path::Path;
 
-use fluffy::tts::models::config::MioCodecConfig;
-use fluffy::tts::models::miocodec::{linear_interpolate, MioCodecDecoder};
-use fluffy::tts::models::wavlm::{GlobalEncoder, WavLM};
+use candle_miotts::models::config::MioCodecConfig;
+use candle_miotts::models::miocodec::{linear_interpolate, MioCodecDecoder};
+use candle_miotts::models::wavlm::{GlobalEncoder, WavLM};
 
 // ──────── .npy reader (NumPy format v1.0) ────────
 

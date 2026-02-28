@@ -95,7 +95,7 @@ pub enum ConfigReady {
 /// Handle to the initialized TTS engine — stored as a Bevy Resource.
 #[derive(Resource)]
 pub struct TtsEngineHandle {
-    pub engine: std::sync::Arc<tokio::sync::Mutex<crate::tts::engine::TtsEngine>>,
+    pub engine: std::sync::Arc<tokio::sync::Mutex<candle_miotts::engine::TtsEngine>>,
 }
 
 /// Handle to an initialized Whisper model — stored as a Bevy Resource.

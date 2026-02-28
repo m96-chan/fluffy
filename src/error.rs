@@ -11,9 +11,6 @@ pub enum AppError {
     #[error("LLM error: {0}")]
     Llm(String),
 
-    #[error("TTS error: {0}")]
-    Tts(String),
-
     #[error("Pipeline error: {0}")]
     Pipeline(String),
 
@@ -28,9 +25,6 @@ pub enum AppError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-
-    #[error("Download error: {0}")]
-    Download(String),
 
     #[error("Sandbox violation: access to {0} is not allowed")]
     SandboxViolation(String),

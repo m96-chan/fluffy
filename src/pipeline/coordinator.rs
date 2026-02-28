@@ -9,7 +9,9 @@ use crate::events::{MascotPhase, PipelineMessage};
 use crate::llm::{client as llm_client, tool_use};
 use crate::pipeline::lip_sync;
 use crate::state::AppConfig;
-use crate::tts::{client as tts_client, engine::TtsEngine, sentence::SentenceSplitter};
+use candle_miotts::engine::TtsEngine;
+use candle_miotts::sentence::SentenceSplitter;
+use crate::tts::client as tts_client;
 use crate::stt::whisper as stt_whisper;
 
 /// Message types flowing through the internal pipeline channels.
