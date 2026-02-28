@@ -109,7 +109,10 @@ unsafe impl Send for WhisperModel {}
 unsafe impl Sync for WhisperModel {}
 
 /// Active pipeline state — stored as a Bevy Resource.
-#[derive(Resource, Default)]
+///
+/// Owns a tokio runtime that lives as long as the pipeline is running.
+/// Bevy systems run on the Compute Task Pool which has no tokio reactor,
+/// so we need our own runtime for async pipeline tasks.
 pub struct PipelineState {
     pub cancel_token: Option<CancellationToken>,
     pub receiver: Option<
@@ -119,6 +122,20 @@ pub struct PipelineState {
             >,
         >,
     >,
+    /// Tokio runtime that keeps spawned pipeline tasks alive.
+    pub runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Resource for PipelineState {}
+
+impl Default for PipelineState {
+    fn default() -> Self {
+        Self {
+            cancel_token: None,
+            receiver: None,
+            runtime: None,
+        }
+    }
 }
 
 impl PipelineState {

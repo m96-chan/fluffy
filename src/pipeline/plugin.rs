@@ -123,7 +123,7 @@ fn start_pipeline(
     let config_arc = Arc::new(config.clone());
     let ctx_arc = whisper.ctx.clone();
 
-    let runtime = tokio::runtime::Handle::current();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let (cancel, rx) = runtime.block_on(async {
         crate::pipeline::coordinator::start_pipeline(config_arc, ctx_arc)
             .await
@@ -132,6 +132,7 @@ fn start_pipeline(
 
     pipeline.cancel_token = Some(cancel);
     pipeline.receiver = Some(Arc::new(tokio::sync::Mutex::new(rx)));
+    pipeline.runtime = Some(runtime);
 
     info!("Pipeline: started");
 }
@@ -142,6 +143,7 @@ fn stop_pipeline(pipeline: &mut PipelineState, _writer: &mut MessageWriter<Pipel
         info!("Pipeline: stopped");
     }
     pipeline.receiver = None;
+    pipeline.runtime = None;
 }
 
 #[cfg(test)]
