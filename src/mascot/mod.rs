@@ -14,15 +14,21 @@ impl Plugin for MascotPlugin {
             .insert_resource(MascotClipSet::default())
             .insert_resource(ExitGreetingRequest::default())
             .insert_resource(BlinkState::default())
+            .insert_resource(LipSyncState::default())
             .insert_resource(MascotBehaviorState::default())
             .insert_resource(YawnSchedule::default())
+            .insert_resource(ExpressionState::default())
             .add_systems(
                 Update,
                 (
                     spawn_mascot_scene,
                     fit_mascot_to_window_once,
                     resolve_blink_target_once,
+                    resolve_lip_sync_target_once,
+                    resolve_expression_targets_once,
                     drive_blink,
+                    drive_lip_sync,
+                    drive_expression,
                     prepare_mascot_clips,
                     setup_player_graph,
                     handle_window_close_request,
@@ -35,6 +41,9 @@ impl Plugin for MascotPlugin {
 
 #[derive(Component)]
 pub struct MascotTag;
+
+#[derive(Component)]
+struct ShadowTag;
 
 #[derive(Component)]
 struct MascotGltfHandle(pub Handle<Gltf>);
@@ -93,8 +102,75 @@ impl Default for BlinkState {
 }
 
 #[derive(Resource, Default)]
+struct LipSyncState {
+    targets: Option<VowelTargets>,
+    /// Current smoothed weights (EMA).
+    current: [f32; 5],
+    /// Target weights from latest message.
+    target: [f32; 5],
+}
+
+struct VowelTargets {
+    entity: Entity,
+    /// Morph indices: [aa, ih, ou, ee, oh]
+    indices: [usize; 5],
+}
+
+#[derive(Resource, Default)]
 struct MascotBehaviorState {
     thinking: bool,
+}
+
+/// Expression morph target indices resolved from the model.
+struct ExpressionTargets {
+    entity: Entity,
+    /// Maps morph target name → index.
+    indices: Vec<(String, usize)>,
+}
+
+/// Defines which morph targets to activate for an emotion, with their target weights.
+struct EmotionDef {
+    targets: &'static [(&'static str, f32)],
+}
+
+/// All known emotion definitions. Each emotion drives a set of morph targets.
+fn emotion_defs() -> &'static [(&'static str, EmotionDef)] {
+    use std::sync::LazyLock;
+    static DEFS: LazyLock<Vec<(&'static str, EmotionDef)>> = LazyLock::new(|| vec![
+        ("happy", EmotionDef { targets: &[("eye_happy", 1.0), ("mouth_smile_1", 1.0)] }),
+        ("sad", EmotionDef { targets: &[("eye_sad", 1.0), ("mouth_n", 0.6)] }),
+        ("surprised", EmotionDef { targets: &[("eye_surprise", 1.0), ("mouth_pokan", 1.0)] }),
+        ("angry", EmotionDef { targets: &[("eye_angry", 1.0), ("mouth_angry_1", 0.8)] }),
+        ("thinking", EmotionDef { targets: &[("eye_nagomi", 0.7), ("mouth_n", 0.4)] }),
+        ("excited", EmotionDef { targets: &[("eye_happy", 1.0), ("mouth_smile_2", 1.0)] }),
+        ("confused", EmotionDef { targets: &[("eye_maru", 0.8), ("mouth_hawa", 0.7)] }),
+        ("shy", EmotionDef { targets: &[("eye_smile_1", 0.8), ("mouth_ω", 0.7)] }),
+        ("embarrassed", EmotionDef { targets: &[("eye_smile_2", 0.8), ("mouth_hawa", 0.6)] }),
+        ("neutral", EmotionDef { targets: &[] }),
+    ]);
+    &DEFS
+}
+
+#[derive(Resource)]
+struct ExpressionState {
+    targets: Option<ExpressionTargets>,
+    /// Current emotion name (empty = neutral).
+    emotion: String,
+    /// Per-morph-target current smoothed weight.
+    current_weights: Vec<f32>,
+    /// Per-morph-target desired weight for current emotion.
+    target_weights: Vec<f32>,
+}
+
+impl Default for ExpressionState {
+    fn default() -> Self {
+        Self {
+            targets: None,
+            emotion: String::new(),
+            current_weights: Vec::new(),
+            target_weights: Vec::new(),
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -210,6 +286,10 @@ fn fit_mascot_to_window_once(
     mut mascot_q: Query<(Entity, &mut Transform), (With<MascotTag>, With<MascotSpawned>, Without<MascotFitted>)>,
     children_q: Query<&Children>,
     global_q: Query<&GlobalTransform>,
+    config: Res<crate::state::AppConfig>,
+    asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let Ok((mascot_entity, mut root_transform)) = mascot_q.single_mut() else {
         return;
@@ -253,6 +333,31 @@ fn fit_mascot_to_window_once(
         "Mascot: fitted to viewport (nodes={}, src_height={:.3}, dst_height={:.1}, scale={:.5}, y={:.1})",
         count, current_height, target_height, new_uniform_scale, root_transform.translation.y
     );
+
+    // Spawn drop shadow under mascot feet
+    if config.shadow_enabled {
+        let shadow_width = current_height * new_uniform_scale * 0.5;
+        let shadow_depth = shadow_width * 0.25;
+        let foot_y = -target_height * 0.5;
+
+        let shadow_texture: Handle<Image> = asset_server.load("textures/shadow.png");
+        commands.spawn((
+            Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::new(shadow_width, shadow_depth)))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color_texture: Some(shadow_texture),
+                base_color: Color::srgba(0.0, 0.0, 0.0, config.shadow_opacity),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, foot_y, -1.0),
+            ShadowTag,
+        ));
+        info!(
+            "Mascot: shadow spawned (width={:.1}, depth={:.1}, y={:.1}, opacity={:.2})",
+            shadow_width, shadow_depth, foot_y, config.shadow_opacity
+        );
+    }
 }
 
 fn resolve_blink_target_once(
@@ -330,6 +435,184 @@ fn drive_blink(
         0.0
     };
     morph.weights_mut()[blink_idx] = weight.clamp(0.0, 1.0);
+}
+
+fn resolve_lip_sync_target_once(
+    mut lip: ResMut<LipSyncState>,
+    morph_q: Query<(Entity, &MorphWeights, Option<&Name>)>,
+    meshes: Res<Assets<Mesh>>,
+) {
+    if lip.targets.is_some() {
+        return;
+    }
+
+    // Candidate names per vowel: [aa, ih, ou, ee, oh]
+    const VOWEL_CANDIDATES: &[&[&str]] = &[
+        &["vrc.v_aa", "vrc.aa", "aa", "mouth_open", "jawOpen", "mouth_a"],
+        &["vrc.v_ih", "vrc.ih", "vrc.v_i", "vrc.i", "ih", "mouth_i"],
+        &["vrc.v_ou", "vrc.ou", "vrc.v_u", "vrc.u", "ou", "mouth_u"],
+        &["vrc.v_e", "vrc.ee", "vrc.v_ee", "vrc.e", "ee", "mouth_e"],
+        &["vrc.v_oh", "vrc.oh", "vrc.v_o", "vrc.o", "oh", "mouth_o"],
+    ];
+
+    for (entity, morph, name) in &morph_q {
+        let Some(mesh_handle) = morph.first_mesh() else {
+            continue;
+        };
+        let Some(mesh) = meshes.get(mesh_handle) else {
+            continue;
+        };
+        let Some(names) = mesh.morph_target_names() else {
+            continue;
+        };
+
+        let mut indices = [usize::MAX; 5];
+        let mut found_count = 0;
+
+        for (v, candidates) in VOWEL_CANDIDATES.iter().enumerate() {
+            for cand in *candidates {
+                if let Some(i) = names.iter().position(|n| n.eq_ignore_ascii_case(cand)) {
+                    indices[v] = i;
+                    found_count += 1;
+                    break;
+                }
+            }
+        }
+
+        // Need at least "aa" to be useful
+        if indices[0] != usize::MAX {
+            info!(
+                "Mascot: lip sync targets resolved entity={:?} name={:?} aa={} ih={} ou={} ee={} oh={} ({}/5 found)",
+                entity,
+                name.map(|n| n.as_str()),
+                indices[0], indices[1], indices[2], indices[3], indices[4],
+                found_count
+            );
+            lip.targets = Some(VowelTargets { entity, indices });
+            return;
+        }
+    }
+}
+
+fn drive_lip_sync(
+    time: Res<Time>,
+    mut lip: ResMut<LipSyncState>,
+    mut morph_q: Query<&mut MorphWeights>,
+) {
+    let Some(ref targets) = lip.targets else {
+        return;
+    };
+    let entity = targets.entity;
+    let indices = targets.indices;
+    let Ok(mut morph) = morph_q.get_mut(entity) else {
+        return;
+    };
+    let weights_len = morph.weights().len();
+
+    // Exponential moving average for smooth mouth movement
+    let alpha = 1.0 - (-time.delta_secs() * 12.0).exp();
+    let decay = (1.0 - time.delta_secs() * 8.0).max(0.0);
+
+    for i in 0..5 {
+        // Smooth toward target
+        lip.current[i] += (lip.target[i] - lip.current[i]) * alpha;
+        // Decay target toward zero when no new data arrives
+        lip.target[i] *= decay;
+
+        if indices[i] < weights_len {
+            morph.weights_mut()[indices[i]] = lip.current[i].clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// Collect all expression-related morph target names and their indices.
+/// Runs once after the model is loaded.
+fn resolve_expression_targets_once(
+    mut expr: ResMut<ExpressionState>,
+    morph_q: Query<(Entity, &MorphWeights, Option<&Name>)>,
+    meshes: Res<Assets<Mesh>>,
+) {
+    if expr.targets.is_some() {
+        return;
+    }
+
+    // Gather all morph target names used by any emotion.
+    let defs = emotion_defs();
+    let mut wanted: Vec<&str> = Vec::new();
+    for (_, def) in defs {
+        for (name, _) in def.targets {
+            if !wanted.contains(name) {
+                wanted.push(name);
+            }
+        }
+    }
+
+    for (entity, morph, name) in &morph_q {
+        let Some(mesh_handle) = morph.first_mesh() else {
+            continue;
+        };
+        let Some(mesh) = meshes.get(mesh_handle) else {
+            continue;
+        };
+        let Some(names) = mesh.morph_target_names() else {
+            continue;
+        };
+
+        let mut found: Vec<(String, usize)> = Vec::new();
+        for want in &wanted {
+            if let Some(i) = names.iter().position(|n| n.eq_ignore_ascii_case(want)) {
+                found.push((want.to_string(), i));
+            }
+        }
+
+        if !found.is_empty() {
+            let n = found.len();
+            info!(
+                "Mascot: expression targets resolved entity={:?} name={:?} ({} morph targets: {:?})",
+                entity,
+                name.map(|n| n.as_str()),
+                n,
+                found.iter().map(|(s, i)| format!("{}={}", s, i)).collect::<Vec<_>>()
+            );
+            expr.current_weights = vec![0.0; found.len()];
+            expr.target_weights = vec![0.0; found.len()];
+            expr.targets = Some(ExpressionTargets {
+                entity,
+                indices: found,
+            });
+            return;
+        }
+    }
+}
+
+/// Smoothly drive expression morph targets toward the current emotion's weights.
+fn drive_expression(
+    time: Res<Time>,
+    mut expr: ResMut<ExpressionState>,
+    mut morph_q: Query<&mut MorphWeights>,
+) {
+    let Some(ref targets) = expr.targets else {
+        return;
+    };
+    let entity = targets.entity;
+    let Ok(mut morph) = morph_q.get_mut(entity) else {
+        return;
+    };
+    let weights_len = morph.weights().len();
+
+    // Smooth transition: ~4Hz approach speed (gentler than lip sync)
+    let alpha = 1.0 - (-time.delta_secs() * 4.0).exp();
+
+    // Copy indices to avoid borrow conflict with expr.current_weights
+    let morph_indices: Vec<usize> = targets.indices.iter().map(|(_, idx)| *idx).collect();
+
+    for (i, &morph_idx) in morph_indices.iter().enumerate() {
+        expr.current_weights[i] += (expr.target_weights[i] - expr.current_weights[i]) * alpha;
+
+        if morph_idx < weights_len {
+            morph.weights_mut()[morph_idx] = expr.current_weights[i].clamp(0.0, 1.0);
+        }
+    }
 }
 
 fn prepare_mascot_clips(
@@ -568,6 +851,8 @@ fn handle_pipeline_messages(
     time: Res<Time>,
     mut behavior: ResMut<MascotBehaviorState>,
     mut yawn: ResMut<YawnSchedule>,
+    mut lip: ResMut<LipSyncState>,
+    mut expr: ResMut<ExpressionState>,
 ) {
     let now = time.elapsed_secs_f64();
     for msg in reader.read() {
@@ -579,6 +864,9 @@ fn handle_pipeline_messages(
                     yawn.bump_from(now);
                 } else if !matches!(phase, crate::events::MascotPhase::Processing) {
                     behavior.thinking = false;
+                }
+                if matches!(phase, crate::events::MascotPhase::Idle | crate::events::MascotPhase::Listening) {
+                    set_emotion(&mut expr, "neutral");
                 }
             }
             PipelineMessage::SttResult { .. } => {
@@ -594,9 +882,50 @@ fn handle_pipeline_messages(
                 behavior.thinking = false;
                 yawn.bump_from(now);
             }
-            PipelineMessage::EmotionChange { .. }
-            | PipelineMessage::LipSyncAmplitude { .. }
-            | PipelineMessage::PipelineError { .. } => {}
+            PipelineMessage::LipSync { aa, ih, ou, ee, oh } => {
+                lip.target = [*aa, *ih, *ou, *ee, *oh];
+            }
+            PipelineMessage::EmotionChange { emotion } => {
+                set_emotion(&mut expr, emotion);
+            }
+            PipelineMessage::Interrupted => {
+                set_emotion(&mut expr, "surprised");
+                behavior.thinking = false;
+                yawn.bump_from(now);
+            }
+            PipelineMessage::PipelineError { .. } => {}
+        }
+    }
+}
+
+/// Update expression target weights for the given emotion.
+fn set_emotion(expr: &mut ExpressionState, emotion: &str) {
+    if expr.emotion == emotion {
+        return;
+    }
+    info!("Mascot: emotion → {}", emotion);
+    expr.emotion = emotion.to_string();
+
+    // Reset all targets to 0
+    for w in expr.target_weights.iter_mut() {
+        *w = 0.0;
+    }
+
+    let Some(ref targets) = expr.targets else {
+        return;
+    };
+
+    // Find matching emotion definition
+    let defs = emotion_defs();
+    let def = defs.iter().find(|(name, _)| *name == emotion);
+    let Some((_, def)) = def else {
+        return;
+    };
+
+    // Set target weights for this emotion's morph targets
+    for (morph_name, weight) in def.targets {
+        if let Some(i) = targets.indices.iter().position(|(n, _)| n.eq_ignore_ascii_case(morph_name)) {
+            expr.target_weights[i] = *weight;
         }
     }
 }

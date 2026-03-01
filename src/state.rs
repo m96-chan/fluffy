@@ -5,7 +5,11 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Application configuration — stored as a Bevy Resource.
+///
+/// Loaded from `~/.config/fluffy/config.toml`.
+/// Missing fields fall back to defaults (env vars, then hardcoded).
 #[derive(Debug, Clone, Serialize, Deserialize, Resource)]
+#[serde(default)]
 pub struct AppConfig {
     pub api_key: String,
     pub anthropic_api_url: String,
@@ -15,8 +19,17 @@ pub struct AppConfig {
     pub vad_silence_hold_frames: usize,
     pub audio_device: Option<String>,
     pub system_prompt: String,
-    /// Path to the Whisper GGML model file.
-    pub whisper_model_path: PathBuf,
+    /// Whisper model size (e.g. "medium", "small", "large-v3-turbo").
+    pub whisper_model_id: String,
+    /// Whisper STT language code (e.g. "ja", "en", "auto").
+    pub stt_language: String,
+    /// Delay (ms) after turn start before VAD is treated as barge-in.
+    /// VAD within this window is assumed to be speaker echo and ignored.
+    pub barge_in_delay_ms: u64,
+    /// Whether to show a drop shadow under the mascot.
+    pub shadow_enabled: bool,
+    /// Opacity of the drop shadow (0.0–1.0).
+    pub shadow_opacity: f32,
 }
 
 impl Default for AppConfig {
@@ -36,35 +49,62 @@ impl Default for AppConfig {
             vad_silence_hold_frames: 25,
             audio_device: None,
             system_prompt: default_system_prompt(),
-            whisper_model_path: default_whisper_model_path(),
+            whisper_model_id: std::env::var("WHISPER_MODEL_ID")
+                .unwrap_or_else(|_| "medium".to_string()),
+            stt_language: "ja".to_string(),
+            barge_in_delay_ms: 500,
+            shadow_enabled: true,
+            shadow_opacity: 0.35,
         }
     }
 }
 
-fn default_whisper_model_path() -> PathBuf {
-    if let Ok(p) = std::env::var("WHISPER_MODEL_PATH") {
-        return PathBuf::from(p);
-    }
-    // XDG data dir or fallback to ~/.local/share/fluffy/models/
-    let base = std::env::var("FLUFFY_MODEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs_next::data_dir()
-                .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-                .join("fluffy")
-                .join("models")
-        });
-    base.join("ggml-base.bin")
-}
-
 impl AppConfig {
+    /// Path to the config file.
+    pub fn config_path() -> PathBuf {
+        dirs_next::config_dir()
+            .unwrap_or_else(|| PathBuf::from("~/.config"))
+            .join("fluffy")
+            .join("config.toml")
+    }
+
+    /// Load from `~/.config/fluffy/config.toml`.
+    /// Missing fields fall back to `Default` (env vars, then hardcoded).
+    pub fn load() -> Self {
+        let path = Self::config_path();
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let mut cfg: Self = toml::from_str(&contents).unwrap_or_else(|e| {
+                    tracing::warn!("Failed to parse {}: {} — using defaults", path.display(), e);
+                    Self::default()
+                });
+                // api_key: env var always takes precedence over TOML
+                let env_key = std::env::var("ANTHROPIC_API_KEY")
+                    .or_else(|_| std::env::var("CLAUDE_API_KEY"))
+                    .unwrap_or_default();
+                if !env_key.is_empty() {
+                    cfg.api_key = env_key;
+                }
+                // system_prompt: if not set in TOML, load from file
+                if cfg.system_prompt.is_empty() {
+                    cfg.system_prompt = default_system_prompt();
+                }
+                cfg
+            }
+            Err(_) => {
+                tracing::info!("No config found at {} — using defaults", path.display());
+                Self::default()
+            }
+        }
+    }
+
     /// Returns true if the minimum required fields are set.
     pub fn is_ready(&self) -> ConfigReady {
         if self.api_key.is_empty() {
             return ConfigReady::MissingApiKey;
         }
-        if !self.whisper_model_path.exists() {
-            return ConfigReady::MissingWhisperModel(self.whisper_model_path.clone());
+        if crate::stt::download::WhisperModelId::from_str(&self.whisper_model_id).is_none() {
+            return ConfigReady::InvalidWhisperModel(self.whisper_model_id.clone());
         }
         ConfigReady::Ok
     }
@@ -111,24 +151,14 @@ Available tools: read_file, write_file, list_files, run_command
 pub enum ConfigReady {
     Ok,
     MissingApiKey,
-    MissingWhisperModel(PathBuf),
-}
-
-/// Handle to the initialized TTS engine — stored as a Bevy Resource.
-#[derive(Resource)]
-pub struct TtsEngineHandle {
-    pub engine: std::sync::Arc<tokio::sync::Mutex<candle_miotts::engine::TtsEngine>>,
+    InvalidWhisperModel(String),
 }
 
 /// Handle to an initialized Whisper model — stored as a Bevy Resource.
 #[derive(Resource)]
 pub struct WhisperModel {
-    pub ctx: Arc<whisper_rs::WhisperContext>,
-    pub model_path: PathBuf,
+    pub engine: Arc<crate::stt::whisper::WhisperEngine>,
 }
-
-unsafe impl Send for WhisperModel {}
-unsafe impl Sync for WhisperModel {}
 
 /// Active pipeline state — stored as a Bevy Resource.
 ///
@@ -190,21 +220,23 @@ mod tests {
     }
 
     #[test]
-    fn config_ready_missing_model() {
+    fn config_ready_invalid_model() {
         let cfg = AppConfig {
             api_key: "sk-test".to_string(),
-            whisper_model_path: PathBuf::from("/nonexistent/model.bin"),
+            whisper_model_id: "nonexistent-model".to_string(),
             ..AppConfig::default()
         };
-        assert!(matches!(cfg.is_ready(), ConfigReady::MissingWhisperModel(_)));
+        assert!(matches!(
+            cfg.is_ready(),
+            ConfigReady::InvalidWhisperModel(_)
+        ));
     }
 
     #[test]
-    fn config_ready_ok_with_real_file() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
+    fn config_ready_ok_with_valid_model() {
         let cfg = AppConfig {
             api_key: "sk-test".to_string(),
-            whisper_model_path: tmp.path().to_path_buf(),
+            whisper_model_id: "medium".to_string(),
             ..AppConfig::default()
         };
         assert_eq!(cfg.is_ready(), ConfigReady::Ok);
@@ -221,7 +253,7 @@ mod tests {
         let token = CancellationToken::new();
         let state = PipelineState {
             cancel_token: Some(token),
-            receiver: None,
+            ..Default::default()
         };
         assert!(state.is_running());
     }
@@ -232,7 +264,7 @@ mod tests {
         token.cancel();
         let state = PipelineState {
             cancel_token: Some(token),
-            receiver: None,
+            ..Default::default()
         };
         assert!(!state.is_running());
     }
