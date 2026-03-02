@@ -9,6 +9,7 @@ mod error;
 mod events;
 mod llm;
 mod mascot;
+mod perch;
 mod pipeline;
 mod state;
 mod stt;
@@ -40,7 +41,7 @@ fn main() {
             }),
         )
         .insert_resource(ClearColor(Color::NONE))
-        .insert_resource(state::AppConfig::default())
+        .insert_resource(state::AppConfig::load())
         .insert_resource(state::PipelineState::default())
         .add_message::<events::PipelineMessage>()
         .add_plugins(mascot::MascotPlugin)
@@ -48,6 +49,7 @@ fn main() {
         .add_plugins(pipeline::plugin::PipelinePlugin)
         .add_plugins(stt::loader::WhisperLoaderPlugin)
         .add_plugins(chat::overlay::ChatOverlayPlugin)
+        .add_plugins(perch::PerchPlugin)
         .add_plugins(window::WindowManagerPlugin)
         .run();
 }

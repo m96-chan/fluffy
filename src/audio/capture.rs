@@ -7,7 +7,7 @@ use cpal::{SampleFormat, Stream, SupportedStreamConfig};
 /// cpal::Stream on Linux (ALSA/PipeWire) is safe to send between threads in
 /// practice; the `!Send` bound is a conservative cross-platform marker.
 /// The stream object is only ever dropped on the dedicated keeper thread.
-struct SendableStream(Stream);
+struct SendableStream(#[allow(dead_code)] Stream);
 unsafe impl Send for SendableStream {}
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -147,7 +147,7 @@ pub async fn start_capture(
 
 fn get_input_config(device: &cpal::Device) -> Result<SupportedStreamConfig, AppError> {
     // First try exact 16kHz
-    let desired = cpal::StreamConfig {
+    let _desired = cpal::StreamConfig {
         channels: 1,
         sample_rate: cpal::SampleRate(TARGET_SAMPLE_RATE),
         buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
@@ -227,15 +227,6 @@ fn linear_resample(input: &[f32], ratio: f64) -> Vec<f32> {
         out.push(s0 + (s1 - s0) * frac as f32);
     }
     out
-}
-
-pub fn list_input_devices() -> Vec<String> {
-    let host = cpal::default_host();
-    host.input_devices()
-        .map(|devs| {
-            devs.filter_map(|d| d.name().ok()).collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

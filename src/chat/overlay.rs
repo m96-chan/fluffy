@@ -27,9 +27,14 @@ struct ChatPanel;
 struct MessageList;
 
 #[derive(Component)]
-struct MessageItem(usize);
+struct MessageItem(#[allow(dead_code)] usize);
 
-fn setup_ui(mut commands: Commands) {
+#[derive(Resource)]
+struct ChatFont(Handle<Font>);
+
+fn setup_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let font = asset_server.load("fonts/NotoSansJP-Regular.ttf");
+    commands.insert_resource(ChatFont(font.clone()));
     commands
         .spawn(Node {
             width: Val::Percent(100.0),
@@ -64,7 +69,7 @@ fn setup_ui(mut commands: Commands) {
             .with_children(|panel| {
                 panel.spawn((
                     Text::new("Chat  [ T to close ]"),
-                    TextFont { font_size: 10.0, ..default() },
+                    TextFont { font: font.clone(), font_size: 10.0, ..default() },
                     TextColor(Color::srgba(0.5, 0.5, 0.55, 1.0)),
                     Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() },
                 ));
@@ -99,6 +104,7 @@ fn handle_toggle_key(keys: Res<ButtonInput<KeyCode>>, mut chat: ResMut<ChatState
 
 fn update_chat_ui(
     chat: Res<ChatState>,
+    chat_font: Res<ChatFont>,
     mut panel_q: Query<&mut Visibility, With<ChatPanel>>,
     list_q: Query<Entity, With<MessageList>>,
     mut commands: Commands,
@@ -148,13 +154,13 @@ fn update_chat_ui(
             .with_children(|bubble| {
                 bubble.spawn((
                     Text::new(label),
-                    TextFont { font_size: 9.0, ..default() },
+                    TextFont { font: chat_font.0.clone(), font_size: 9.0, ..default() },
                     TextColor(label_color),
                     Node { margin: UiRect::bottom(Val::Px(2.0)), ..default() },
                 ));
                 bubble.spawn((
                     Text::new(msg.text.clone()),
-                    TextFont { font_size: 11.0, ..default() },
+                    TextFont { font: chat_font.0.clone(), font_size: 11.0, ..default() },
                     TextColor(text_color),
                 ));
             });
@@ -184,6 +190,15 @@ fn handle_pipeline_messages(
             }
             PipelineMessage::LlmDone => {
                 chat.finish_assistant_message();
+            }
+            PipelineMessage::Interrupted => {
+                // Mark the current streaming message as interrupted
+                if let Some(msg) = chat.messages.last_mut() {
+                    if msg.is_streaming {
+                        msg.text.push_str(" [中断]");
+                        msg.is_streaming = false;
+                    }
+                }
             }
             _ => {}
         }

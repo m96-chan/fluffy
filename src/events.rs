@@ -15,10 +15,23 @@ pub enum PipelineMessage {
     LlmDone,
     /// Emotion hint detected in LLM output
     EmotionChange { emotion: String },
-    /// PCM audio chunk for lip sync amplitude
-    LipSyncAmplitude { amplitude: f32 },
+    /// Vowel weights for lip sync (formant-analysed from PCM)
+    LipSync {
+        aa: f32,
+        ih: f32,
+        ou: f32,
+        ee: f32,
+        oh: f32,
+    },
+    /// LLM turn was interrupted by user barge-in
+    Interrupted,
     /// Error from any pipeline stage
-    PipelineError { source: String, message: String },
+    PipelineError {
+        #[allow(dead_code)]
+        source: String,
+        #[allow(dead_code)]
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]

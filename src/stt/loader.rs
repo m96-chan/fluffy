@@ -1,8 +1,9 @@
-/// Startup system that loads the Whisper model from disk.
+/// Startup system that downloads and loads the Whisper model.
 
 use bevy::prelude::*;
 use std::sync::Arc;
 
+use crate::stt::download::WhisperModelId;
 use crate::state::{AppConfig, WhisperModel};
 
 pub struct WhisperLoaderPlugin;
@@ -14,26 +15,35 @@ impl Plugin for WhisperLoaderPlugin {
 }
 
 fn load_whisper_model(mut commands: Commands, config: Res<AppConfig>) {
-    let path = &config.whisper_model_path;
-
-    if !path.exists() {
+    let Some(model_id) = WhisperModelId::from_str(&config.whisper_model_id) else {
         warn!(
-            "Whisper model not found at {:?} — voice input disabled. \
-             Set FLUFFY_MODEL_DIR or use the download feature (issue #2).",
-            path
+            "Unknown Whisper model '{}' — voice input disabled. \
+             Use one of: tiny, base, small, medium, large-v3-turbo",
+            config.whisper_model_id
         );
         return;
-    }
+    };
 
-    info!("Loading Whisper model from {:?}...", path);
+    info!("Downloading/caching Whisper model: {} ...", model_id);
 
-    match crate::stt::whisper::load_whisper_context(path) {
-        Ok(ctx) => {
+    let files = match crate::stt::download::ensure_whisper_model(model_id) {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to download Whisper model: {}", e);
+            return;
+        }
+    };
+
+    // Select device: CUDA if available, else CPU
+    let device = select_device();
+    info!("Loading Whisper model on {:?}...", device);
+
+    match crate::stt::whisper::WhisperEngine::load(&files, &device) {
+        Ok(engine) => {
             commands.insert_resource(WhisperModel {
-                ctx,
-                model_path: path.clone(),
+                engine: Arc::new(engine),
             });
-            info!("Whisper model loaded.");
+            info!("Whisper model loaded on {:?}.", device);
         }
         Err(e) => {
             error!("Failed to load Whisper model: {}", e);
@@ -41,40 +51,51 @@ fn load_whisper_model(mut commands: Commands, config: Res<AppConfig>) {
     }
 }
 
+fn select_device() -> candle_core::Device {
+    #[cfg(feature = "cuda")]
+    {
+        match candle_core::Device::new_cuda(0) {
+            Ok(d) => return d,
+            Err(e) => {
+                tracing::warn!("CUDA not available, falling back to CPU: {}", e);
+            }
+        }
+    }
+    candle_core::Device::Cpu
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::ConfigReady;
-    use std::path::PathBuf;
 
     #[test]
-    fn missing_model_path_detected_before_load() {
+    fn unknown_model_id_detected() {
         let cfg = AppConfig {
             api_key: "sk-test".to_string(),
-            whisper_model_path: PathBuf::from("/nonexistent/ggml.bin"),
+            whisper_model_id: "nonexistent".to_string(),
             ..AppConfig::default()
         };
-        // is_ready() catches this before we even try to load
-        assert!(matches!(cfg.is_ready(), ConfigReady::MissingWhisperModel(_)));
+        assert!(matches!(
+            cfg.is_ready(),
+            ConfigReady::InvalidWhisperModel(_)
+        ));
     }
 
     #[test]
-    fn existing_file_passes_readiness_check() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
+    fn valid_model_id_passes_readiness() {
         let cfg = AppConfig {
             api_key: "sk-test".to_string(),
-            whisper_model_path: tmp.path().to_path_buf(),
+            whisper_model_id: "medium".to_string(),
             ..AppConfig::default()
         };
         assert_eq!(cfg.is_ready(), ConfigReady::Ok);
     }
 
     #[test]
-    fn model_path_default_uses_data_dir() {
+    fn model_id_default_is_medium() {
+        std::env::remove_var("WHISPER_MODEL_ID");
         let cfg = AppConfig::default();
-        // Should contain "fluffy/models/ggml-base.bin" somewhere in the path
-        let path_str = cfg.whisper_model_path.to_string_lossy();
-        assert!(path_str.contains("fluffy"), "Expected 'fluffy' in path: {}", path_str);
-        assert!(path_str.ends_with("ggml-base.bin"), "Expected ggml-base.bin: {}", path_str);
+        assert_eq!(cfg.whisper_model_id, "medium");
     }
 }

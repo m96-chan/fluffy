@@ -30,6 +30,10 @@ pub struct AppConfig {
     pub shadow_enabled: bool,
     /// Opacity of the drop shadow (0.0–1.0).
     pub shadow_opacity: f32,
+    /// Whether window perching is enabled.
+    pub perch_enabled: bool,
+    /// Gravity acceleration for falling (px/s²).
+    pub perch_gravity: f32,
 }
 
 impl Default for AppConfig {
@@ -55,6 +59,8 @@ impl Default for AppConfig {
             barge_in_delay_ms: 500,
             shadow_enabled: true,
             shadow_opacity: 0.35,
+            perch_enabled: false,
+            perch_gravity: 800.0,
         }
     }
 }

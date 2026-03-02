@@ -14,9 +14,6 @@ pub enum AppError {
     #[error("Pipeline error: {0}")]
     Pipeline(String),
 
-    #[error("Config error: {0}")]
-    Config(String),
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

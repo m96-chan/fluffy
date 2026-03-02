@@ -1,5 +1,5 @@
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::error::AppError;
 

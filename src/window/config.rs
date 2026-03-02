@@ -63,6 +63,7 @@ impl WindowConfig {
     }
 
     /// Save with a custom path (for testing).
+    #[cfg(test)]
     pub fn save_to(&self, path: &std::path::Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -73,6 +74,7 @@ impl WindowConfig {
     }
 
     /// Load from a custom path (for testing).
+    #[cfg(test)]
     pub fn load_from(path: &std::path::Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(contents) => toml::from_str(&contents).unwrap_or_default(),

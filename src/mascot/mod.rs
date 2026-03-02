@@ -5,6 +5,7 @@ use bevy::window::WindowCloseRequested;
 use std::time::Duration;
 
 use crate::events::PipelineMessage;
+use crate::perch::{PerchMode, PerchState};
 
 pub struct MascotPlugin;
 
@@ -34,7 +35,12 @@ impl Plugin for MascotPlugin {
                     handle_window_close_request,
                     handle_pipeline_messages,
                     drive_mascot_animation,
+                    sync_perch_to_animation,
                 ),
+            )
+            .add_systems(
+                PostUpdate,
+                pin_hips_bone.after(bevy::app::AnimationSystems),
             );
     }
 }
@@ -54,12 +60,22 @@ struct MascotSpawned;
 #[derive(Component)]
 struct MascotFitted;
 
+/// Marker for the skeleton root bone (Hips) whose translation must be
+/// pinned to prevent animation root motion from pushing the model off-screen
+/// (the 462x parent scale amplifies any bone translation enormously).
+#[derive(Component)]
+struct PinnedHipsBone {
+    rest_translation: Vec3,
+}
+
 #[derive(Component)]
 struct MascotAnimState {
     idle_node: AnimationNodeIndex,
     thinking_node: AnimationNodeIndex,
     yawn_node: Option<AnimationNodeIndex>,
     greeting_node: Option<AnimationNodeIndex>,
+    sitting_node: Option<AnimationNodeIndex>,
+    falling_down_node: Option<AnimationNodeIndex>,
     phase: MascotPhase,
 }
 
@@ -71,6 +87,8 @@ enum MascotPhase {
     Yawn,
     ExitGreeting,
     Exiting,
+    Sitting,
+    FallingDown,
 }
 
 #[derive(Resource, Default)]
@@ -79,6 +97,8 @@ struct MascotClipSet {
     thinking: Option<Handle<AnimationClip>>,
     yawn: Option<Handle<AnimationClip>>,
     greeting: Option<Handle<AnimationClip>>,
+    sitting: Option<Handle<AnimationClip>>,
+    falling_down: Option<Handle<AnimationClip>>,
 }
 
 #[derive(Resource, Default)]
@@ -353,10 +373,6 @@ fn fit_mascot_to_window_once(
             Transform::from_xyz(0.0, foot_y, -1.0),
             ShadowTag,
         ));
-        info!(
-            "Mascot: shadow spawned (width={:.1}, depth={:.1}, y={:.1}, opacity={:.2})",
-            shadow_width, shadow_depth, foot_y, config.shadow_opacity
-        );
     }
 }
 
@@ -424,7 +440,7 @@ fn drive_blink(
         return;
     }
 
-    // 3.2s周期。末尾 0.16s で 0->1->0 の瞬き。
+    // 3.2s cycle. Last 0.16s: 0->1->0 blink.
     blink.elapsed += time.delta_secs();
     let phase = blink.elapsed.rem_euclid(3.2);
     let weight = if phase < 0.08 {
@@ -446,7 +462,6 @@ fn resolve_lip_sync_target_once(
         return;
     }
 
-    // Candidate names per vowel: [aa, ih, ou, ee, oh]
     const VOWEL_CANDIDATES: &[&[&str]] = &[
         &["vrc.v_aa", "vrc.aa", "aa", "mouth_open", "jawOpen", "mouth_a"],
         &["vrc.v_ih", "vrc.ih", "vrc.v_i", "vrc.i", "ih", "mouth_i"],
@@ -479,7 +494,6 @@ fn resolve_lip_sync_target_once(
             }
         }
 
-        // Need at least "aa" to be useful
         if indices[0] != usize::MAX {
             info!(
                 "Mascot: lip sync targets resolved entity={:?} name={:?} aa={} ih={} ou={} ee={} oh={} ({}/5 found)",
@@ -509,14 +523,11 @@ fn drive_lip_sync(
     };
     let weights_len = morph.weights().len();
 
-    // Exponential moving average for smooth mouth movement
     let alpha = 1.0 - (-time.delta_secs() * 12.0).exp();
     let decay = (1.0 - time.delta_secs() * 8.0).max(0.0);
 
     for i in 0..5 {
-        // Smooth toward target
         lip.current[i] += (lip.target[i] - lip.current[i]) * alpha;
-        // Decay target toward zero when no new data arrives
         lip.target[i] *= decay;
 
         if indices[i] < weights_len {
@@ -525,8 +536,6 @@ fn drive_lip_sync(
     }
 }
 
-/// Collect all expression-related morph target names and their indices.
-/// Runs once after the model is loaded.
 fn resolve_expression_targets_once(
     mut expr: ResMut<ExpressionState>,
     morph_q: Query<(Entity, &MorphWeights, Option<&Name>)>,
@@ -536,7 +545,6 @@ fn resolve_expression_targets_once(
         return;
     }
 
-    // Gather all morph target names used by any emotion.
     let defs = emotion_defs();
     let mut wanted: Vec<&str> = Vec::new();
     for (_, def) in defs {
@@ -568,11 +576,8 @@ fn resolve_expression_targets_once(
         if !found.is_empty() {
             let n = found.len();
             info!(
-                "Mascot: expression targets resolved entity={:?} name={:?} ({} morph targets: {:?})",
-                entity,
-                name.map(|n| n.as_str()),
-                n,
-                found.iter().map(|(s, i)| format!("{}={}", s, i)).collect::<Vec<_>>()
+                "Mascot: expression targets resolved entity={:?} name={:?} ({} morph targets)",
+                entity, name.map(|n| n.as_str()), n,
             );
             expr.current_weights = vec![0.0; found.len()];
             expr.target_weights = vec![0.0; found.len()];
@@ -585,7 +590,6 @@ fn resolve_expression_targets_once(
     }
 }
 
-/// Smoothly drive expression morph targets toward the current emotion's weights.
 fn drive_expression(
     time: Res<Time>,
     mut expr: ResMut<ExpressionState>,
@@ -600,10 +604,8 @@ fn drive_expression(
     };
     let weights_len = morph.weights().len();
 
-    // Smooth transition: ~4Hz approach speed (gentler than lip sync)
     let alpha = 1.0 - (-time.delta_secs() * 4.0).exp();
 
-    // Copy indices to avoid borrow conflict with expr.current_weights
     let morph_indices: Vec<usize> = targets.indices.iter().map(|(_, idx)| *idx).collect();
 
     for (i, &morph_idx) in morph_indices.iter().enumerate() {
@@ -635,6 +637,8 @@ fn prepare_mascot_clips(
     let mut greeting = None;
     let mut thinking = None;
     let mut yawn = None;
+    let mut sitting = None;
+    let mut falling_down = None;
 
     for (name, clip) in &gltf.named_animations {
         let n = name.to_ascii_lowercase();
@@ -650,6 +654,12 @@ fn prepare_mascot_clips(
         if yawn.is_none() && n.contains("yawn") {
             yawn = Some(clip.clone());
         }
+        if sitting.is_none() && n.contains("sitting") {
+            sitting = Some(clip.clone());
+        }
+        if falling_down.is_none() && (n.contains("falling") || n.contains("fall")) {
+            falling_down = Some(clip.clone());
+        }
     }
 
     if idle.is_none() {
@@ -660,12 +670,16 @@ fn prepare_mascot_clips(
     clips.greeting = greeting;
     clips.thinking = thinking.or_else(|| clips.idle.clone());
     clips.yawn = yawn;
+    clips.sitting = sitting;
+    clips.falling_down = falling_down;
     info!(
-        "Mascot clips: idle={}, thinking={}, yawn={}, greeting={}",
+        "Mascot clips: idle={}, thinking={}, yawn={}, greeting={}, sitting={}, falling={}",
         clips.idle.is_some(),
         clips.thinking.is_some(),
         clips.yawn.is_some(),
-        clips.greeting.is_some()
+        clips.greeting.is_some(),
+        clips.sitting.is_some(),
+        clips.falling_down.is_some(),
     );
 }
 
@@ -674,6 +688,8 @@ fn setup_player_graph(
     mut commands: Commands,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut players: Query<(Entity, &mut AnimationPlayer), (Added<AnimationPlayer>, Without<MascotAnimState>)>,
+    children_q: Query<&Children>,
+    name_q: Query<(&Name, &Transform)>,
 ) {
     let Some(idle_clip) = clips.idle.clone() else {
         return;
@@ -691,6 +707,14 @@ fn setup_player_graph(
             .map(|h| graph.add_clip(h, 1.0, graph.root));
         let greeting_node = clips
             .greeting
+            .clone()
+            .map(|h| graph.add_clip(h, 1.0, graph.root));
+        let sitting_node = clips
+            .sitting
+            .clone()
+            .map(|h| graph.add_clip(h, 1.0, graph.root));
+        let falling_down_node = clips
+            .falling_down
             .clone()
             .map(|h| graph.add_clip(h, 1.0, graph.root));
         let graph_handle = graphs.add(graph);
@@ -711,12 +735,43 @@ fn setup_player_graph(
             thinking_node,
             yawn_node,
             greeting_node,
+            sitting_node,
+            falling_down_node,
             phase: initial_phase,
         });
         info!("Mascot: animation graph initialized; startup={:?}", initial_phase);
 
+        // Find and pin the "Hips" bone to prevent animation root motion
+        // from pushing the model off-screen (root motion is amplified by
+        // the ~462x parent scale).
+        if let Ok(children) = children_q.get(entity) {
+            for child in children.iter() {
+                if let Ok((name, transform)) = name_q.get(child) {
+                    if name.as_str() == "Hips" {
+                        commands.entity(child).insert(PinnedHipsBone {
+                            rest_translation: transform.translation,
+                        });
+                        info!(
+                            "Mascot: pinned Hips bone at rest={:?}",
+                            transform.translation
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
         commands.entity(entity).insert(AnimationGraphHandle(graph_handle));
         commands.entity(entity).insert(transitions);
+    }
+}
+
+/// Pin the Hips bone's translation after animation evaluation.
+/// This removes root motion while preserving rotation/scale animation.
+/// Runs in PostUpdate, after Bevy's animation system has applied clips.
+fn pin_hips_bone(mut q: Query<(&PinnedHipsBone, &mut Transform)>) {
+    for (pin, mut transform) in &mut q {
+        transform.translation = pin.rest_translation;
     }
 }
 
@@ -842,6 +897,8 @@ fn drive_mascot_animation(
                 }
             }
             MascotPhase::Exiting => {}
+            // Perch-driven phases — handled by sync_perch_to_animation
+            MascotPhase::Sitting | MascotPhase::FallingDown => {}
         }
     }
 }
@@ -874,7 +931,6 @@ fn handle_pipeline_messages(
                 behavior.thinking = true;
             }
             PipelineMessage::LlmToken { .. } => {
-                // AI response has started; leave thinking animation.
                 behavior.thinking = false;
                 yawn.bump_from(now);
             }
@@ -898,6 +954,55 @@ fn handle_pipeline_messages(
     }
 }
 
+/// Synchronize perch mode → mascot animation phase.
+fn sync_perch_to_animation(
+    perch: Res<PerchState>,
+    mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions, &mut MascotAnimState)>,
+) {
+    for (mut player, mut transitions, mut state) in &mut players {
+        if matches!(
+            state.phase,
+            MascotPhase::ExitGreeting | MascotPhase::Exiting | MascotPhase::StartupGreeting
+        ) {
+            return;
+        }
+
+        match perch.mode {
+            PerchMode::Perched { .. } => {
+                if state.phase != MascotPhase::Sitting {
+                    if let Some(sitting) = state.sitting_node {
+                        transitions
+                            .play(&mut player, sitting, Duration::from_millis(300))
+                            .set_repeat(bevy::animation::RepeatAnimation::Forever);
+                        state.phase = MascotPhase::Sitting;
+                        info!("Mascot: animation → Sitting");
+                    }
+                }
+            }
+            PerchMode::Falling => {
+                if state.phase != MascotPhase::FallingDown {
+                    if let Some(falling) = state.falling_down_node {
+                        transitions
+                            .play(&mut player, falling, Duration::from_millis(120))
+                            .set_repeat(bevy::animation::RepeatAnimation::Never);
+                        state.phase = MascotPhase::FallingDown;
+                        info!("Mascot: animation → FallingDown");
+                    }
+                }
+            }
+            PerchMode::Standing => {
+                if matches!(state.phase, MascotPhase::Sitting | MascotPhase::FallingDown) {
+                    transitions
+                        .play(&mut player, state.idle_node, Duration::from_millis(300))
+                        .set_repeat(bevy::animation::RepeatAnimation::Forever);
+                    state.phase = MascotPhase::Idle;
+                    info!("Mascot: animation → Idle (from perch)");
+                }
+            }
+        }
+    }
+}
+
 /// Update expression target weights for the given emotion.
 fn set_emotion(expr: &mut ExpressionState, emotion: &str) {
     if expr.emotion == emotion {
@@ -906,7 +1011,6 @@ fn set_emotion(expr: &mut ExpressionState, emotion: &str) {
     info!("Mascot: emotion → {}", emotion);
     expr.emotion = emotion.to_string();
 
-    // Reset all targets to 0
     for w in expr.target_weights.iter_mut() {
         *w = 0.0;
     }
@@ -915,14 +1019,12 @@ fn set_emotion(expr: &mut ExpressionState, emotion: &str) {
         return;
     };
 
-    // Find matching emotion definition
     let defs = emotion_defs();
     let def = defs.iter().find(|(name, _)| *name == emotion);
     let Some((_, def)) = def else {
         return;
     };
 
-    // Set target weights for this emotion's morph targets
     for (morph_name, weight) in def.targets {
         if let Some(i) = targets.indices.iter().position(|(n, _)| n.eq_ignore_ascii_case(morph_name)) {
             expr.target_weights[i] = *weight;

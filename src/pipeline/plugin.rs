@@ -3,12 +3,9 @@
 
 use bevy::prelude::*;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::audio::playback::PlaybackEngine;
 use crate::events::PipelineMessage;
-use crate::state::{AppConfig, ConfigReady, PipelineState, TtsEngineHandle, WhisperModel};
-use crate::tts::client as tts_client;
+use crate::state::{AppConfig, ConfigReady, PipelineState, WhisperModel};
 
 pub struct PipelinePlugin;
 
@@ -26,18 +23,18 @@ fn log_pipeline_config(config: Res<AppConfig>) {
         "set"
     };
     info!(
-        "Pipeline config: api_key={}, model={}, anthropic_api_url={}, whisper_model_path={}, tts_clone_voice_wav={}",
+        "Pipeline config: api_key={}, model={}, anthropic_api_url={}, whisper_model={}, tts_clone_voice_wav={}",
         key_state,
         config.model,
         config.anthropic_api_url,
-        config.whisper_model_path.display(),
+        config.whisper_model_id,
         config.tts_clone_voice_wav.display()
     );
 }
 
 /// Initialize the local TTS engine on a background thread.
 /// Once ready, inserts TtsEngineHandle as a Bevy Resource.
-fn init_tts_engine(mut commands: Commands, config: Res<AppConfig>) {
+fn init_tts_engine(_commands: Commands, config: Res<AppConfig>) {
     let clone_wav = config.tts_clone_voice_wav.clone();
 
     std::thread::spawn(move || {
@@ -102,11 +99,11 @@ fn start_pipeline(
             });
             return;
         }
-        ConfigReady::MissingWhisperModel(path) => {
-            warn!("Pipeline: Whisper model not found at {:?}", path);
+        ConfigReady::InvalidWhisperModel(id) => {
+            warn!("Pipeline: Invalid Whisper model ID: {}", id);
             writer.write(PipelineMessage::PipelineError {
                 source: "config".into(),
-                message: format!("Whisper model not found: {}", path.display()),
+                message: format!("Invalid Whisper model: {id}"),
             });
             return;
         }
@@ -121,11 +118,11 @@ fn start_pipeline(
     info!("Pipeline: starting");
 
     let config_arc = Arc::new(config.clone());
-    let ctx_arc = whisper.ctx.clone();
+    let engine_arc = whisper.engine.clone();
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let (cancel, rx) = runtime.block_on(async {
-        crate::pipeline::coordinator::start_pipeline(config_arc, ctx_arc)
+        crate::pipeline::coordinator::start_pipeline(config_arc, engine_arc)
             .await
             .expect("Failed to start pipeline")
     });
@@ -150,18 +147,7 @@ fn stop_pipeline(pipeline: &mut PipelineState, _writer: &mut MessageWriter<Pipel
 mod tests {
     use super::*;
     use crate::state::ConfigReady;
-    use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
-
-    // Helper: config that is ready (has api_key, model file exists)
-    fn ready_config() -> AppConfig {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        AppConfig {
-            api_key: "sk-test".to_string(),
-            whisper_model_path: tmp.path().to_path_buf(),
-            ..AppConfig::default()
-        }
-    }
 
     #[test]
     fn config_not_ready_without_api_key() {
@@ -174,13 +160,16 @@ mod tests {
     }
 
     #[test]
-    fn config_not_ready_without_model_file() {
+    fn config_not_ready_with_invalid_model() {
         let cfg = AppConfig {
             api_key: "sk-test".to_string(),
-            whisper_model_path: PathBuf::from("/does/not/exist.bin"),
+            whisper_model_id: "nonexistent".to_string(),
             ..AppConfig::default()
         };
-        assert!(matches!(cfg.is_ready(), ConfigReady::MissingWhisperModel(_)));
+        assert!(matches!(
+            cfg.is_ready(),
+            ConfigReady::InvalidWhisperModel(_)
+        ));
     }
 
     #[test]
@@ -193,7 +182,7 @@ mod tests {
     fn pipeline_state_running_when_token_active() {
         let state = PipelineState {
             cancel_token: Some(CancellationToken::new()),
-            receiver: None,
+            ..Default::default()
         };
         assert!(state.is_running());
     }
@@ -204,7 +193,7 @@ mod tests {
         token.cancel();
         let state = PipelineState {
             cancel_token: Some(token),
-            receiver: None,
+            ..Default::default()
         };
         assert!(!state.is_running());
     }
@@ -214,7 +203,7 @@ mod tests {
         let token = CancellationToken::new();
         let mut pipeline = PipelineState {
             cancel_token: Some(token),
-            receiver: None,
+            ..Default::default()
         };
         assert!(pipeline.is_running());
 

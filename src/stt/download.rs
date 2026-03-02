@@ -1,124 +1,105 @@
-/// Whisper GGML model downloader.
-/// Downloads from Hugging Face on first launch when the model file is missing.
+/// Whisper model downloader using hf-hub.
+/// Downloads safetensors, config, and tokenizer from Hugging Face.
 
-use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use std::path::PathBuf;
+use tracing::info;
 
 use crate::error::AppError;
 
-/// Known Whisper GGML models available on Hugging Face.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WhisperModel {
+/// Known Whisper model sizes, mapped to HF repo IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhisperModelId {
     Tiny,
     Base,
     Small,
+    Medium,
+    LargeV3Turbo,
 }
 
-impl WhisperModel {
-    pub fn filename(&self) -> &'static str {
+impl WhisperModelId {
+    pub fn repo_id(&self) -> &'static str {
         match self {
-            Self::Tiny => "ggml-tiny.bin",
-            Self::Base => "ggml-base.bin",
-            Self::Small => "ggml-small.bin",
+            Self::Tiny => "openai/whisper-tiny",
+            Self::Base => "openai/whisper-base",
+            Self::Small => "openai/whisper-small",
+            Self::Medium => "openai/whisper-medium",
+            Self::LargeV3Turbo => "openai/whisper-large-v3-turbo",
         }
     }
 
-    pub fn url(&self) -> String {
-        format!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-            self.filename()
-        )
-    }
-
-    pub fn from_filename(name: &str) -> Option<Self> {
-        match name {
-            "ggml-tiny.bin" => Some(Self::Tiny),
-            "ggml-base.bin" => Some(Self::Base),
-            "ggml-small.bin" => Some(Self::Small),
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "tiny" | "openai/whisper-tiny" => Some(Self::Tiny),
+            "base" | "openai/whisper-base" => Some(Self::Base),
+            "small" | "openai/whisper-small" => Some(Self::Small),
+            "medium" | "openai/whisper-medium" => Some(Self::Medium),
+            "large-v3-turbo" | "openai/whisper-large-v3-turbo" => Some(Self::LargeV3Turbo),
             _ => None,
         }
     }
+
 }
 
-/// Download progress callback type.
-pub type ProgressFn = Box<dyn Fn(u64, u64) + Send + 'static>;
-
-/// Download a Whisper model to `dest_path`, reporting progress via `on_progress(downloaded, total)`.
-/// Skips download if the file already exists.
-pub async fn ensure_model(
-    model: &WhisperModel,
-    dest_path: &Path,
-    on_progress: Option<ProgressFn>,
-) -> Result<(), AppError> {
-    if dest_path.exists() {
-        info!("Whisper model already exists at {:?}", dest_path);
-        return Ok(());
+impl std::fmt::Display for WhisperModelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.repo_id())
     }
-
-    // Create parent directories
-    if let Some(parent) = dest_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(AppError::Io)?;
-    }
-
-    let url = model.url();
-    info!("Downloading Whisper model from {}", url);
-
-    download_file(&url, dest_path, on_progress).await
 }
 
-async fn download_file(
-    url: &str,
-    dest: &Path,
-    on_progress: Option<ProgressFn>,
-) -> Result<(), AppError> {
-    use tokio::io::AsyncWriteExt;
+/// Paths to downloaded Whisper model files.
+pub struct WhisperModelFiles {
+    pub config: PathBuf,
+    pub model: PathBuf,
+    pub tokenizer: PathBuf,
+}
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(AppError::Http)?;
+/// Download/cache Whisper model files via hf-hub.
+/// Returns paths to the cached files.
+pub fn ensure_whisper_model(model_id: WhisperModelId) -> Result<WhisperModelFiles, AppError> {
+    let repo_id = model_id.repo_id();
+    info!("Ensuring Whisper model files for {}", repo_id);
 
-    if !response.status().is_success() {
-        return Err(AppError::Stt(format!(
-            "Download failed: HTTP {} for {}",
-            response.status(),
-            url
-        )));
-    }
+    let api = hf_hub::api::sync::Api::new()
+        .map_err(|e| AppError::Stt(format!("hf-hub API init failed: {e}")))?;
+    let repo = api.model(repo_id.to_string());
 
-    let total = response.content_length().unwrap_or(0);
-    let mut downloaded: u64 = 0;
+    let config = repo
+        .get("config.json")
+        .map_err(|e| AppError::Stt(format!("Failed to download config.json: {e}")))?;
+    let model = repo
+        .get("model.safetensors")
+        .map_err(|e| AppError::Stt(format!("Failed to download model.safetensors: {e}")))?;
+    let tokenizer = repo
+        .get("tokenizer.json")
+        .map_err(|e| AppError::Stt(format!("Failed to download tokenizer.json: {e}")))?;
 
-    // Write to a temp file first, then rename atomically
-    let tmp_path = dest.with_extension("tmp");
-    let mut file = tokio::fs::File::create(&tmp_path)
-        .await
-        .map_err(AppError::Io)?;
+    info!(
+        "Whisper model files ready: config={}, model={}, tokenizer={}",
+        config.display(),
+        model.display(),
+        tokenizer.display()
+    );
 
-    use futures_util::StreamExt;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(AppError::Http)?;
-        file.write_all(&chunk).await.map_err(AppError::Io)?;
-        downloaded += chunk.len() as u64;
-        if let Some(cb) = &on_progress {
-            cb(downloaded, total);
-        }
-    }
+    Ok(WhisperModelFiles {
+        config,
+        model,
+        tokenizer,
+    })
+}
 
-    file.flush().await.map_err(AppError::Io)?;
-    drop(file);
+/// Load embedded mel filter coefficients for the given mel bin count.
+pub fn load_mel_filters(num_mel_bins: usize) -> Result<Vec<f32>, AppError> {
+    use byteorder::{ByteOrder, LittleEndian};
 
-    tokio::fs::rename(&tmp_path, dest)
-        .await
-        .map_err(AppError::Io)?;
+    let bytes = match num_mel_bins {
+        80 => include_bytes!("../../assets/whisper/melfilters.bytes").as_slice(),
+        128 => include_bytes!("../../assets/whisper/melfilters128.bytes").as_slice(),
+        n => return Err(AppError::Stt(format!("Unsupported num_mel_bins: {n}"))),
+    };
 
-    info!("Whisper model saved to {:?}", dest);
-    Ok(())
+    let mut filters = vec![0f32; bytes.len() / 4];
+    LittleEndian::read_f32_into(bytes, &mut filters);
+    Ok(filters)
 }
 
 #[cfg(test)]
@@ -126,57 +107,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_filenames_are_correct() {
-        assert_eq!(WhisperModel::Tiny.filename(), "ggml-tiny.bin");
-        assert_eq!(WhisperModel::Base.filename(), "ggml-base.bin");
-        assert_eq!(WhisperModel::Small.filename(), "ggml-small.bin");
+    fn model_repo_ids_are_correct() {
+        assert_eq!(WhisperModelId::Tiny.repo_id(), "openai/whisper-tiny");
+        assert_eq!(WhisperModelId::Base.repo_id(), "openai/whisper-base");
+        assert_eq!(WhisperModelId::Small.repo_id(), "openai/whisper-small");
+        assert_eq!(WhisperModelId::Medium.repo_id(), "openai/whisper-medium");
+        assert_eq!(
+            WhisperModelId::LargeV3Turbo.repo_id(),
+            "openai/whisper-large-v3-turbo"
+        );
     }
 
     #[test]
-    fn model_urls_point_to_huggingface() {
-        let url = WhisperModel::Base.url();
-        assert!(url.contains("huggingface.co"), "URL: {}", url);
-        assert!(url.ends_with("ggml-base.bin"), "URL: {}", url);
-    }
-
-    #[test]
-    fn from_filename_roundtrip() {
-        for model in [WhisperModel::Tiny, WhisperModel::Base, WhisperModel::Small] {
-            let name = model.filename();
-            assert_eq!(WhisperModel::from_filename(name), Some(model));
+    fn from_str_roundtrip() {
+        for id in [
+            WhisperModelId::Tiny,
+            WhisperModelId::Base,
+            WhisperModelId::Small,
+            WhisperModelId::Medium,
+            WhisperModelId::LargeV3Turbo,
+        ] {
+            // Short name
+            let short = id.repo_id().strip_prefix("openai/whisper-").unwrap();
+            assert_eq!(WhisperModelId::from_str(short), Some(id));
+            // Full repo ID
+            assert_eq!(WhisperModelId::from_str(id.repo_id()), Some(id));
         }
     }
 
     #[test]
-    fn from_filename_unknown_returns_none() {
-        assert_eq!(WhisperModel::from_filename("unknown.bin"), None);
-    }
-
-    #[tokio::test]
-    async fn ensure_model_skips_if_file_exists() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        // File already exists → should return Ok without downloading
-        let result = ensure_model(&WhisperModel::Base, tmp.path(), None).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn ensure_model_creates_parent_dirs() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let dest = tmp_dir.path().join("subdir").join("model").join("ggml-tiny.bin");
-        // Just check that parent dirs get created (actual download will fail without network)
-        // We test only the dir creation logic here — use a file that already exists to avoid real download
-        let existing = tempfile::NamedTempFile::new().unwrap();
-        let existing_path = existing.path().to_path_buf();
-        let result = ensure_model(&WhisperModel::Tiny, &existing_path, None).await;
-        assert!(result.is_ok(), "Should skip download for existing file");
+    fn from_str_unknown_returns_none() {
+        assert_eq!(WhisperModelId::from_str("unknown"), None);
     }
 
     #[test]
-    fn progress_callback_signature() {
-        // Verify the type compiles correctly
-        let _cb: ProgressFn = Box::new(|downloaded, total| {
-            let _ = (downloaded, total);
-        });
+    fn mel_filters_80_loads() {
+        let filters = load_mel_filters(80).unwrap();
+        // 80 mel bins * 201 frequency bins = 16080 values
+        assert_eq!(filters.len(), 80 * 201);
+    }
+
+    #[test]
+    fn mel_filters_128_loads() {
+        let filters = load_mel_filters(128).unwrap();
+        assert_eq!(filters.len(), 128 * 201);
+    }
+
+    #[test]
+    fn mel_filters_unsupported() {
+        assert!(load_mel_filters(64).is_err());
     }
 }

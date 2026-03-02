@@ -3,6 +3,7 @@
 
 use bevy::prelude::{Resource, Vec2};
 
+#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Resource)]
 pub struct DragState {
     pub active: bool,
@@ -12,6 +13,7 @@ pub struct DragState {
     pub start_window: Vec2,
 }
 
+#[allow(dead_code)]
 impl DragState {
     pub fn begin(&mut self, cursor: Vec2, window_pos: Vec2) {
         self.active = true;

@@ -2,8 +2,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
-
 use crate::error::AppError;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -11,10 +9,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 #[derive(Debug, Clone)]
 pub enum LlmChunk {
     Token(String),
-    Sentence(String),
     ToolCall { id: String, name: String, input: Value },
     Done,
-    Error(String),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -149,13 +145,10 @@ async fn parse_sse_stream(
 }
 
 fn parse_sse_event(event_str: &str) -> Option<Value> {
-    let mut event_type = None;
     let mut data = None;
 
     for line in event_str.lines() {
-        if let Some(rest) = line.strip_prefix("event: ") {
-            event_type = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("data: ") {
+        if let Some(rest) = line.strip_prefix("data: ") {
             data = Some(rest.trim().to_string());
         }
     }
