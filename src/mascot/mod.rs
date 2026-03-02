@@ -356,7 +356,8 @@ fn fit_mascot_to_window_once(
 
     // Spawn drop shadow under mascot feet
     if config.shadow_enabled {
-        let shadow_width = current_height * new_uniform_scale * 0.5;
+        let viewport_half_w = crate::chat::state::MASCOT_WIDTH as f32 * 0.5;
+        let shadow_width = (current_height * new_uniform_scale * 0.5).min(viewport_half_w * 0.9);
         let shadow_depth = shadow_width * 0.25;
         let foot_y = -target_height * 0.5;
 
