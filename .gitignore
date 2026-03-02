@@ -12,3 +12,11 @@ assets/fbx/
 assets/voice/
 
 .env
+.python-version
+
+# Python
+__pycache__/
+
+# Vendor test/experiment files
+vendor/miocodec_test/
+vendor/whisper-rs-sys/
