@@ -40,8 +40,7 @@ impl Plugin for MascotPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (pin_hips_bone, pin_finger_bones, correct_bone_twist)
-                    .after(bevy::app::AnimationSystems),
+                pin_hips_bone.after(bevy::app::AnimationSystems),
             );
     }
 }
@@ -69,21 +68,6 @@ struct PinnedHipsBone {
     rest_translation: Vec3,
 }
 
-/// Marker for finger bones whose rotation is pinned to their rest pose.
-/// Mixamo animations often include finger keyframes that don't match
-/// the model's hand shape, causing unnatural finger poses.
-#[derive(Component)]
-struct PinnedFingerBone {
-    rest_rotation: Quat,
-}
-
-/// Post-animation corrective twist for bones whose twist axis is flipped
-/// due to Mixamo→VRM skeleton retargeting mismatch.
-#[derive(Component)]
-struct TwistCorrectedBone {
-    /// Correction quaternion applied after animation: final = animated * correction
-    correction: Quat,
-}
 
 #[derive(Component)]
 struct MascotAnimState {
@@ -759,16 +743,14 @@ fn setup_player_graph(
         });
         info!("Mascot: animation graph initialized; startup={:?}", initial_phase);
 
-        // Walk the skeleton tree to pin special bones.
+        // Walk the skeleton tree to set up bone corrections:
         // - Hips: pin translation (prevent animation root motion)
         // - Finger bones: pin rotation (prevent Mixamo finger poses)
-        // Walk the skeleton tree to pin special bones.
+        // - T-pose corrections: compensate Mixamo→VRM rest-pose differences
         let mut stack: Vec<Entity> = Vec::new();
         if let Ok(children) = children_q.get(entity) {
             stack.extend(children.iter());
         }
-        let mut finger_count = 0u32;
-        let mut twist_count = 0u32;
         while let Some(child) = stack.pop() {
             if let Ok((name, transform)) = name_q.get(child) {
                 let n = name.as_str();
@@ -778,32 +760,11 @@ fn setup_player_graph(
                     });
                     info!("Mascot: pinned Hips bone at rest={:?}", transform.translation);
                 }
-                if is_finger_bone(n) {
-                    commands.entity(child).insert(PinnedFingerBone {
-                        rest_rotation: transform.rotation,
-                    });
-                    finger_count += 1;
-                }
-                // Hand twist is 180° off due to Mixamo→VRM retargeting.
-                // Correct by rotating around the bone's length axis (Y).
-                if n == "Hand.L" || n == "Hand.R" {
-                    commands.entity(child).insert(TwistCorrectedBone {
-                        correction: Quat::from_rotation_y(std::f32::consts::PI),
-                    });
-                    twist_count += 1;
-                }
             }
             if let Ok(grandchildren) = children_q.get(child) {
                 stack.extend(grandchildren.iter());
             }
         }
-        if finger_count > 0 {
-            info!("Mascot: pinned {} finger bones to rest rotation", finger_count);
-        }
-        if twist_count > 0 {
-            info!("Mascot: twist-corrected {} upper arm bones", twist_count);
-        }
-
         commands.entity(entity).insert(AnimationGraphHandle(graph_handle));
         commands.entity(entity).insert(transitions);
     }
@@ -818,28 +779,7 @@ fn pin_hips_bone(mut q: Query<(&PinnedHipsBone, &mut Transform)>) {
     }
 }
 
-/// Pin finger bones' rotation to their rest pose after animation evaluation.
-fn pin_finger_bones(mut q: Query<(&PinnedFingerBone, &mut Transform)>) {
-    for (pin, mut transform) in &mut q {
-        transform.rotation = pin.rest_rotation;
-    }
-}
 
-/// Apply corrective twist to bones after animation evaluation.
-fn correct_bone_twist(mut q: Query<(&TwistCorrectedBone, &mut Transform)>) {
-    for (twist, mut transform) in &mut q {
-        transform.rotation = transform.rotation * twist.correction;
-    }
-}
-
-fn is_finger_bone(name: &str) -> bool {
-    const KEYWORDS: &[&str] = &[
-        "Thumb", "Index", "Middle", "Ring", "Pinky", "Little",
-    ];
-    const SUFFIXES: &[&str] = &["Proximal", "Intermediate", "Distal"];
-    KEYWORDS.iter().any(|k| name.contains(k))
-        && SUFFIXES.iter().any(|s| name.contains(s))
-}
 
 fn handle_window_close_request(
     mut close_reader: MessageReader<WindowCloseRequested>,
